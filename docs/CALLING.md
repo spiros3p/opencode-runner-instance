@@ -46,6 +46,16 @@ Useful endpoints:
 - `POST /api/session/{id}/prompt` — admit one user message. Body is
   `{"prompt":{"text":"..."}}`.
 - `POST /api/session/{id}/interrupt` — stop an active run.
+- `POST /api/session/{id}/model` — switch model mid-session. Body
+  `{"model":{"providerID":"...","id":"...","variant?":"..."}}` (`variant`
+  optional, e.g. `"high"` for reasoning effort; omit the key when unused).
+- `POST /api/session/{id}/agent` — switch agent mid-session. Body
+  `{"agent":"..."}` (e.g. `build` vs read-only `plan`).
+- `GET /api/session/{id}/permission`, `GET /api/session/{id}/question` —
+  list pending approval/question requests; answer via
+  `POST .../permission/{requestID}/reply` (`once|always|reject`) or the
+  question `reply`/`reject` routes. A headless caller polls these when a
+  turn stalls instead of auto-answering. Shapes: `GET /doc`.
 - `POST /api/session/{id}/wait` — block until the turn settles (gateway polls
   messages, then 204). Answers 204 on timeout too: always confirm via
   `GET .../message` until a `COMPLETE` assistant reply (`time.completed` or
@@ -83,7 +93,14 @@ curl -fsS "$BASE/api/model" -u "$AUTH"
 
 Model ref is `{providerID, id, variant?}`. A provider with no key on the
 runner is inactive and the turn fails with `Model unavailable: provider/model`.
-Keys cannot be passed per call.
+Keys cannot be passed per call. Pass `variant` to select the reasoning
+variant/effort the lane pins (e.g. `"high"`); omit the key when unused:
+
+```bash
+curl -fsS -X POST "$BASE/api/session/$SESSION/model" -u "$AUTH" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":{"providerID":"opencode-go","id":"deepseek-v4.1-flash","variant":"high"}}'
+```
 
 ## 4. JavaScript client
 
@@ -159,3 +176,10 @@ curl -fsS -X POST "$BASE/api/session/$SESSION/permission/$REQUEST_ID/reply" \
 ```
 
 Keep runner and repo configs deny-based.
+
+## Review handoff
+
+Reviews stay local. To review remote work: `GET .../message` for the final
+assistant text and `GET /vcs/diff?directory=<dir>&mode=git` for the patch,
+apply the diff to a local worktree (`git apply --check` first), then run the
+normal local review lane. The runner never merges.
