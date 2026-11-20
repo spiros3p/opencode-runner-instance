@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Clone a repo once into the flat /workspace layout. Uses GITHUB_TOKEN for
+# Clone a repo once into the flat /workspace layout. Uses FETCH_GITHUB_TOKEN for
 # github.com HTTPS clones via askpass, so the PAT never enters argv or
 # .git/config. Prints the absolute directory on stdout; logs go to stderr.
 set -euo pipefail
@@ -90,10 +90,10 @@ fi
 
 if [ "$USE_PAT" = 1 ]; then
   export GIT_TERMINAL_PROMPT=0
-  if [ -n "${GITHUB_TOKEN:-}" ]; then
+  if [ -n "${FETCH_GITHUB_TOKEN:-}" ]; then
     export GIT_ASKPASS=/usr/local/bin/git-askpass
   else
-    log "GITHUB_TOKEN unset; public github.com repos only"
+    log "FETCH_GITHUB_TOKEN unset; public github.com repos only"
   fi
 else
   export GIT_TERMINAL_PROMPT=0

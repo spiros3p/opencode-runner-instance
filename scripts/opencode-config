@@ -96,6 +96,25 @@ def strip_v2(node):
     return found
 
 
+def sanitize_pat_providers(cfg):
+    """Drop provider apiKey values sourced from a GitHub PAT. Returns ids fixed."""
+    fixed = []
+    providers = cfg.get("provider")
+    if not isinstance(providers, dict):
+        return fixed
+    for pid, pconf in providers.items():
+        if not isinstance(pconf, dict):
+            continue
+        opts = pconf.get("options")
+        if not isinstance(opts, dict):
+            continue
+        key = opts.get("apiKey")
+        if isinstance(key, str) and ("GITHUB_TOKEN" in key or "FETCH_GITHUB_TOKEN" in key):
+            del opts["apiKey"]
+            fixed.append(pid)
+    return fixed
+
+
 def merge_permission(cfg):
     """Add missing V1 permission defaults. Operator rules win.
 
@@ -148,6 +167,12 @@ def main():
         return 0
     path = sys.argv[1]
     model = os.environ.get("OPENCODE_MODEL", "").strip()
+    if model and "/" not in model:
+        print(
+            "WARN: OPENCODE_MODEL=%r has no provider prefix; use provider/id "
+            "(e.g. opencode/deepseek-v4-flash)" % model,
+            file=sys.stderr,
+        )
 
     if not os.path.exists(path):
         write(path, fresh_config(model))
@@ -186,21 +211,36 @@ def main():
         backup(path, ".v2.bak")
     changed = had_v2
 
+    # The fetch PAT must never be a model key. The Copilot API rejects PATs, so a
+    # provider apiKey wired to it can never authenticate. Drop the mapping and
+    # leave the provider unconfigured instead of failing every turn.
+    fixed = sanitize_pat_providers(cfg)
+    if fixed:
+        print(
+            "note: removed fetch-PAT apiKey from provider(s) %s; "
+            "Copilot needs an OAuth token via auth.json, not the fetch PAT"
+            % ", ".join(fixed),
+            file=sys.stderr,
+        )
+        changed = True
+
     before = json.dumps(cfg.get("permission"))
     merge_permission(cfg)
     if json.dumps(cfg.get("permission")) != before:
         changed = True
 
     if model:
-        if "model" not in cfg:
+        # .env wins: a redeploy that changes OPENCODE_MODEL must actually
+        # switch the runner default instead of keeping a stale file value.
+        if cfg.get("model") != model:
+            if "model" in cfg:
+                print(
+                    "note: OPENCODE_MODEL=%s overrides %s model=%s"
+                    % (model, path, cfg.get("model")),
+                    file=sys.stderr,
+                )
             cfg["model"] = model
             changed = True
-        elif cfg.get("model") != model:
-            print(
-                "note: OPENCODE_MODEL=%s ignored; %s sets model=%s"
-                % (model, path, cfg.get("model")),
-                file=sys.stderr,
-            )
 
     if changed:
         if not had_v2:

@@ -46,9 +46,13 @@ COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY scripts/fetch-repo /usr/local/bin/fetch-repo
 COPY scripts/git-askpass /usr/local/bin/git-askpass
 COPY scripts/opencode-config /usr/local/bin/opencode-config
+COPY scripts/model-key-check /usr/local/bin/model-key-check
+COPY scripts/opencode-gateway /usr/local/bin/opencode-gateway
 COPY config/supervisord.conf /etc/supervisor/supervisord.conf
 RUN chmod 755 /usr/local/bin/entrypoint.sh /usr/local/bin/fetch-repo \
-      /usr/local/bin/git-askpass /usr/local/bin/opencode-config
+      /usr/local/bin/git-askpass /usr/local/bin/opencode-config \
+      /usr/local/bin/model-key-check \
+      /usr/local/bin/opencode-gateway
 
 EXPOSE 4096 8443
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

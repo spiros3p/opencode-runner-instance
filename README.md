@@ -6,7 +6,7 @@ stack. Repos fetched on demand with a GitHub PAT and kept flat in `./workspace`.
 
 | Port (default) | Service | Auth |
 | -------------- | ------- | ---- |
-| 4096 | native opencode HTTP server (`opencode serve`) | Basic: user `opencode`, password `OPENCODE_PASSWORD` |
+| 4096 | gateway (`scripts/opencode-gateway`): forwards to opencode on loopback, implements `POST /api/session/{id}/wait` | Basic: user `opencode`, password `OPENCODE_PASSWORD` |
 | 8222 host → 8443 container | optional VS Code (`code-server`) | Password `CODE_SERVER_PASSWORD` |
 
 Code-server is off by default. To run it: set `ENABLE_CODE_SERVER=true` in
@@ -22,7 +22,7 @@ Two volumes:
 ```bash
 cp .env.example .env
 # set OPENCODE_PASSWORD to a long random value
-# set GITHUB_TOKEN to a PAT with repo scope for the repos this runner may use
+# set FETCH_GITHUB_TOKEN to a PAT with repo scope for the repos this runner may use
 docker compose up -d --build
 # optional UI: set ENABLE_CODE_SERVER=true in .env, then use:
 # docker compose -f compose.yml -f compose.ui.yml up -d --build
@@ -33,13 +33,13 @@ curl -u opencode:"$OPENCODE_PASSWORD" http://127.0.0.1:4096/api/health
 Tailscale is external. Publish ports on a tailnet host (or front them with
 `tailscale serve`); do not expose 4096/8222 to the public internet.
 UI access is full control of the runner: agent user has passwordless sudo,
-so `CODE_SERVER_PASSWORD` protects provider keys and `GITHUB_TOKEN`.
+so `CODE_SERVER_PASSWORD` protects provider keys and `FETCH_GITHUB_TOKEN`.
 
 ## Fetch a repo
 
 `fetch-repo` clones once into the flat `./workspace` layout. Repeat calls
 return the same directory; no re-clone. It accepts `owner/repo` or an HTTPS
-URL, plus an optional ref. github.com clones use `GITHUB_TOKEN` via askpass,
+URL, plus an optional ref. github.com clones use `FETCH_GITHUB_TOKEN` via askpass,
 so the PAT never enters argv or `.git/config`. SSH URLs are rejected.
 
 ```bash
@@ -66,10 +66,19 @@ curl -fsS -X POST http://127.0.0.1:4096/api/session \
 
 # 2. prompt, wait, read assistant messages
 #    POST /api/session/{id}/prompt      body: {"prompt":{"text":"..."}}
-#    POST /api/session/{id}/wait
+#    POST /api/session/{id}/wait        gateway blocks until the turn settles,
+#                                       then 204 (or 204 on timeout: poll below)
 #    GET  /api/session/{id}/message?order=desc&limit=10   -> {"data":[...]}
 #    GET  /vcs/diff?directory=/workspace/repo&mode=git
 ```
+
+Upstream `opencode serve` 1.x leaves `POST /api/session/{id}/wait` as a stub
+that always answers 503. The gateway on port 4096 implements it: it polls
+the session messages until the newest message is a finished assistant turn
+and answers 204, so the client then reads the reply. If the budget
+(`WAIT_TIMEOUT_SECONDS`, default 600) runs out it still answers 204 and the
+client polls `GET .../message` until a `COMPLETE` assistant reply appears
+(`time.completed` set, or `finish` set; streaming partials do not count).
 
 `@opencode/client` works too; see `docs/CALLING.md`.
 
@@ -118,6 +127,16 @@ provider catalog (models.dev):
 | `google` | `GEMINI_API_KEY` | |
 | `openrouter` | `OPENROUTER_API_KEY` | |
 | `deepseek` | `DEEPSEEK_API_KEY` | |
+| `nvidia` | `NVIDIA_API_KEY` | fallback seat models (e.g. `minimaxai/minimax-m3.1-flash`) |
+| `github-copilot` | OAuth token in `auth.json` only | `opencode providers` login; the fetch PAT is rejected by the Copilot API (HTTP 400) |
+
+The provider/key mapping above is mirrored in `scripts/model-key-check`
+(the boot check); update both together.
+
+`GITHUB_TOKEN` must never be set on this runner: the models.dev catalog maps
+that name to the `github-copilot` provider, so a fetch PAT there breaks every
+copilot turn. The fetch PAT is therefore `FETCH_GITHUB_TOKEN`, and boot fails
+fast if the legacy `GITHUB_TOKEN` name is still present.
 
 One key in `.env`:
 
@@ -173,7 +192,7 @@ You are delegating work to a remote opencode runner. Set up delegation now.
 Runner URL: http://<runner-host>:4096
 Auth: HTTP Basic, user `opencode`. Read the password from your secret store
 under `OPENCODE_RUNNER_PASSWORD`. Never print or echo it.
-The runner holds its own GITHUB_TOKEN PAT. You do not send it.
+The runner holds its own FETCH_GITHUB_TOKEN PAT. You do not send it.
 
 For each delegated task:
 1. Always run `fetch-repo <owner/repo> [ref]` first on the runner (it is cheap
@@ -206,12 +225,34 @@ docker exec opencode-runner opencode --version
 
 Plain `docker compose up -d` reuses the old image. Rebuild required.
 
+## Troubleshooting
+
+All commands run on the runner host, never from the calling harness.
+
+- `POST .../wait` returns 503: you are hitting an image without the gateway.
+  Rebuild and recreate (`docker compose up -d --build --force-recreate`).
+  The gateway answers 204 (settled) or 204 on timeout (poll messages).
+- Prompt admitted but no assistant message appears within minutes: the
+  provider call never returned. Check `docker logs opencode-runner` for the
+  boot line `default model: ...` (warns when the provider key env var is
+  empty), verify the key, then from the host:
+  `docker exec -u agent opencode-runner opencode models <provider> | head`
+  and `curl -m 10 -o /dev/null -w "%{http_code}" https://opencode.ai/inference/openai/v1/models`.
+  Free-tier models can also queue server-side for a long time; a cheap paid
+  model is the better default.
+- `github-copilot` turn errors `Personal Access Tokens are not supported`:
+  a PAT reached the provider. Boot fails while legacy `GITHUB_TOKEN` is set;
+  after the rename, `GITHUB_TOKEN` must stay unset so the catalog default
+  cannot pick it up. Copilot needs an OAuth token via `opencode providers`.
+- `Model unavailable: provider/model`: the model id is wrong or its provider
+  has no key. List `GET /api/model` and match the provider to the key table.
+
 ## Notes
 
 - `OPENCODE_PASSWORD` is exported to the server as `OPENCODE_SERVER_PASSWORD`
   at boot; the Basic auth username defaults to `opencode`
   (`OPENCODE_SERVER_USERNAME`).
-- `GITHUB_TOKEN` is a PAT in env, visible to the agent shell and to anything
+- `FETCH_GITHUB_TOKEN` is a PAT in env, visible to the agent shell and to anything
   with sudo. Scope it to the repos this runner may work on and rotate it.
 - Migrating from the old deploy key: delete `secrets/github_deploy_key` and
   remove that key from GitHub. `secrets/` stays gitignored.
@@ -225,10 +266,15 @@ Plain `docker compose up -d` reuses the old image. Rebuild required.
   from an older image is removed (original kept as `opencode.json.v2.bak`), an
   unparseable file is kept as `opencode.json.invalid`, and every other key you
   added is preserved.
-- To change the model, set `OPENCODE_MODEL` in `.env` and remove the `model`
-  key from `opencode.json` (or edit it in place). A model already in the file
-  wins; the runner logs the mismatch instead of overwriting your choice.
+- To change the model, set `OPENCODE_MODEL=provider/id` in `.env` and recreate
+  the container. The env value always wins over the `model` key stored in
+  `opencode.json` (the helper logs the override and backs the file up).
+  A bare id without a `provider/` prefix warns at boot and rarely resolves.
 - Permission crashes: entrypoint re-chowns home every boot. Live repair:
   `docker exec opencode-runner bash -c 'chown -R agent:agent /home/agent && chmod -R u+rwX,go-rwx /home/agent'`.
-- Tests: `scripts/test-fetch-repo.sh` and `scripts/test-opencode-config.sh`
+- Tests: `scripts/test-fetch-repo.sh`, `scripts/test-opencode-config.sh`, and
+  `scripts/test-opencode-gateway.sh`, and `scripts/test-model-key-check.sh`
   run locally with no network and no container.
+- Migrating `GITHUB_TOKEN` -> `FETCH_GITHUB_TOKEN`: rename the var in `.env`
+  and recreate. Boot refuses to start while the legacy name is set, because
+  the catalog would hand the PAT to the github-copilot provider.

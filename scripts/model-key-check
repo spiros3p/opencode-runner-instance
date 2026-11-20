@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Report whether the default model provider key is present. Prints one line
+# for the entrypoint log, or nothing when there is nothing to say. Exit 0.
+# Usage: model-key-check "$OPENCODE_MODEL"
+# Keep the provider/key mapping below in sync with the provider table in
+# README.md ("Provider credentials"); update both together.
+set -uo pipefail
+MODEL_WANT="${1:-}"
+[ -n "$MODEL_WANT" ] || exit 0
+case "$MODEL_WANT" in
+  */*) MODEL_PROV="${MODEL_WANT%%/*}" ;;
+  *) echo "WARN: OPENCODE_MODEL has no provider prefix; use provider/id"; exit 0 ;;
+esac
+case "$MODEL_PROV" in
+  opencode|opencode-go) MODEL_KEY="OPENCODE_API_KEY" ;;
+  anthropic) MODEL_KEY="ANTHROPIC_API_KEY" ;;
+  openai) MODEL_KEY="OPENAI_API_KEY" ;;
+  google) MODEL_KEY="GEMINI_API_KEY" ;;
+  openrouter) MODEL_KEY="OPENROUTER_API_KEY" ;;
+  deepseek) MODEL_KEY="DEEPSEEK_API_KEY" ;;
+  github-copilot)
+    echo "WARN: default model $MODEL_WANT needs a Copilot OAuth token; a PAT fails with 400"
+    exit 0 ;;
+  *) exit 0 ;;
+esac
+MODEL_KEY_VAL="$(printenv "$MODEL_KEY" || true)"
+if [ -n "${MODEL_KEY_VAL:-}" ]; then
+  echo "default model: $MODEL_WANT ($MODEL_KEY set)"
+else
+  echo "WARN: default model $MODEL_WANT needs ${MODEL_KEY}, which is empty"
+fi

@@ -20,7 +20,21 @@ export OPENCODE_SERVER_PASSWORD="${OPENCODE_SERVER_PASSWORD:-$OP_PASSWORD}"
 export OPENCODE_SERVER_USERNAME="${OPENCODE_SERVER_USERNAME:-opencode}"
 unset OP_PASSWORD
 log "opencode auth: user $OPENCODE_SERVER_USERNAME, password set"
-log "github pat: $([ -n "${GITHUB_TOKEN:-}" ] && echo set || echo unset)"
+if [ -n "${GITHUB_TOKEN:-}" ]; then
+  echo "ERROR: GITHUB_TOKEN is set. Rename it to FETCH_GITHUB_TOKEN in .env:" >&2
+  echo "the models.dev catalog maps GITHUB_TOKEN to the github-copilot provider," >&2
+  echo "and the Copilot API rejects PATs, so every copilot turn would fail." >&2
+  exit 1
+fi
+unset GITHUB_TOKEN
+log "fetch pat: $([ -n "${FETCH_GITHUB_TOKEN:-}" ] && echo set || echo unset) (FETCH_GITHUB_TOKEN: fetch-repo clones only, hidden from the model server)"
+
+# Default-model provider check. The runner answers only when the default
+# model's provider has a key. Warns here so a missing key is visible in
+# `docker logs` instead of surfacing as a silent stuck turn. The logic lives
+# in scripts/model-key-check (unit-tested); the entrypoint relays its line.
+MODEL_CHECK_OUT="$(/usr/local/bin/model-key-check "${OPENCODE_MODEL:-}")"
+if [ -n "$MODEL_CHECK_OUT" ]; then log "$MODEL_CHECK_OUT"; fi
 
 # code-server is opt-in. Normalize once so supervisord always gets true/false;
 # mixed case and trailing whitespace in .env must not silently disable it.
@@ -49,7 +63,7 @@ chown agent:agent /run/supervisor /workspace
 install -d -o agent -g agent -m 700 "$H"
 [ -e "$H/.agentstack-init" ] || { cp -a /etc/skel/. "$H/"; touch "$H/.agentstack-init"; }
 
-# Git identity. HTTPS clones use GITHUB_TOKEN via the fetch-repo askpass helper.
+# Git identity. HTTPS clones use FETCH_GITHUB_TOKEN via the fetch-repo askpass helper.
 git config --system --add safe.directory '*'
 runuser -u agent -- env HOME="$H" git config --global user.name  "${GIT_IDENTITY_NAME:-Agent}"
 runuser -u agent -- env HOME="$H" git config --global user.email "${GIT_IDENTITY_EMAIL:-agent@localhost}"
@@ -75,5 +89,10 @@ fi
 chown -R agent:agent "$H"
 chmod -R u+rwX,go-rwx "$H"
 
-log "starting: opencode (:4096), code-server (:8443, $CODE_SERVER_ON)"
+export GATEWAY_UPSTREAM_HOST="${GATEWAY_UPSTREAM_HOST:-127.0.0.1}"
+export GATEWAY_UPSTREAM_PORT="${GATEWAY_UPSTREAM_PORT:-4097}"
+export WAIT_TIMEOUT_SECONDS="${WAIT_TIMEOUT_SECONDS:-540}"
+export WAIT_POLL_SECONDS="${WAIT_POLL_SECONDS:-1.5}"
+log "gateway: :4096 -> $GATEWAY_UPSTREAM_HOST:$GATEWAY_UPSTREAM_PORT (wait timeout ${WAIT_TIMEOUT_SECONDS}s)"
+log "starting: gateway (:4096), opencode (:4097 loopback), code-server (:8443, $CODE_SERVER_ON)"
 exec supervisord -c /etc/supervisor/supervisord.conf

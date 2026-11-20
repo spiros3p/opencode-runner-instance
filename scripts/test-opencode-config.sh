@@ -133,4 +133,31 @@ run "$T/i/opencode.json" >/dev/null
 assert "wrong order repaired" "$(eff "$T/i/opencode.json" ".env")" "deny"
 assert "normal read still allowed" "$(eff "$T/i/opencode.json" "main.py")" "allow"
 
+# 10. OPENCODE_MODEL env overrides a stale file value (redeploys switch default)
+mkdir -p "$T/j"
+cat > "$T/j/opencode.json" <<'EOF'
+{
+  "model": "stale/model"
+}
+EOF
+if [ -f "$T/j/opencode.json.bak" ]; then fail "backup exists before run"; fi
+MODEL="fresh/model" run "$T/j/opencode.json" >/dev/null 2>/tmp/j-err.txt
+[ -f "$T/j/opencode.json.bak" ] || fail "override backup missing"
+assert "env model wins" "$(jqget "$T/j/opencode.json" "d['model']")" "fresh/model"
+grep -q "overrides" /tmp/j-err.txt || fail "override note missing on stderr"
+
+# 11. bare model (no provider prefix) still written, with a warning
+mkdir -p "$T/k"
+MODEL="baremodel" run "$T/k/opencode.json" >/dev/null 2>/tmp/k-err.txt || true
+[ -f "$T/k/opencode.json" ] || fail "bare model config missing"
+assert "bare model written" "$(jqget "$T/k/opencode.json" "d['model']")" "baremodel"
+grep -q "no provider prefix" /tmp/k-err.txt || fail "bare model warning missing"
+
+# 12. fetch PAT provider mapping is stripped (PAT keys are never model keys)
+mkdir -p "$T/l"
+echo "{\"model\": \"acme/model\", \"provider\": {\"github-copilot\": {\"options\": {\"apiKey\": \"{env:GITHUB_TOKEN}\"}}}}" > "$T/l/opencode.json"
+run "$T/l/opencode.json" >/dev/null 2>/tmp/l-err.txt
+! grep -q "\"apiKey\"" "$T/l/opencode.json" || fail "mapping not stripped"
+grep -q "fetch-PAT" /tmp/l-err.txt || fail "sanitizer note missing"
+
 echo "opencode-config tests passed"

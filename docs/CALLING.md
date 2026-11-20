@@ -15,7 +15,7 @@ docker exec -u agent opencode-runner fetch-repo owner/repo main
 From a harness, tell the runner agent in the first prompt to run
 `fetch-repo <owner/repo> [ref]` and work in the directory it prints. The
 helper clones once, returns the same path on repeat calls, and keeps all repos
-flat under `/workspace`. github.com HTTPS clones use `GITHUB_TOKEN` from the
+flat under `/workspace`. github.com HTTPS clones use `FETCH_GITHUB_TOKEN` from the
 runner's env; the caller does not send a token.
 
 ## 2. Run a task (native opencode API)
@@ -46,7 +46,11 @@ Useful endpoints:
 - `POST /api/session/{id}/prompt` — admit one user message. Body is
   `{"prompt":{"text":"..."}}`.
 - `POST /api/session/{id}/interrupt` — stop an active run.
-- `POST /api/session/{id}/wait` — block until the agent loop is idle.
+- `POST /api/session/{id}/wait` — block until the turn settles (gateway polls
+  messages, then 204). Answers 204 on timeout too: always confirm via
+  `GET .../message` until a `COMPLETE` assistant reply (`time.completed` or
+  `finish` set; ignore streaming partials). Never loops forever client-side:
+  use one overall deadline for wait + poll.
 - `GET /api/session/{id}/message` — read turn history, `{"data":[...]}`.
 - `GET /vcs/diff?directory=<dir>&mode=git` — working tree diff.
 - `GET /api/agent`, `GET /api/model` — discovery.

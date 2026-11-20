@@ -1,0 +1,313 @@
+#!/usr/bin/env python3
+"""Reverse proxy in front of `opencode serve` that implements session wait.
+
+Upstream opencode 1.x leaves `POST /api/session/{id}/wait` as a stub that
+always answers 503 `Session wait is not available yet`. This gateway owns the
+external port, forwards everything else byte-for-byte, and turns wait into a
+real blocking call: it polls the session messages until the latest turn
+settles (or the budget runs out) and then answers 204 so the caller can poll
+`GET /api/session/{id}/message` for the final text.
+
+Config via env:
+  GATEWAY_LISTEN_HOST / GATEWAY_LISTEN_PORT (default 0.0.0.0 / 4096)
+  GATEWAY_UPSTREAM_HOST / GATEWAY_UPSTREAM_PORT (default 127.0.0.1 / 4097)
+  OPENCODE_SERVER_USERNAME / OPENCODE_SERVER_PASSWORD (Basic auth, required)
+  WAIT_TIMEOUT_SECONDS (default 540): max time one wait call blocks
+  WAIT_POLL_SECONDS (default 1.5): message poll interval during wait
+
+Stdlib only. Logs to stdout (supervisord captures it).
+"""
+import base64
+import hmac
+import json
+import os
+import re
+import sys
+import time
+import urllib.parse
+from http import client as http_client
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+LISTEN_HOST = os.environ.get("GATEWAY_LISTEN_HOST", "0.0.0.0")
+LISTEN_PORT = int(os.environ.get("GATEWAY_LISTEN_PORT", "4096"))
+UPSTREAM_HOST = os.environ.get("GATEWAY_UPSTREAM_HOST", "127.0.0.1")
+UPSTREAM_PORT = int(os.environ.get("GATEWAY_UPSTREAM_PORT", "4097"))
+WAIT_TIMEOUT = float(os.environ.get("WAIT_TIMEOUT_SECONDS", "540"))
+WAIT_POLL = float(os.environ.get("WAIT_POLL_SECONDS", "1.5"))
+USERNAME = os.environ.get("OPENCODE_SERVER_USERNAME", "opencode")
+PASSWORD = os.environ.get("OPENCODE_SERVER_PASSWORD", "")
+
+WAIT_RE = re.compile(r"^/api/session/([^/?#]+)/wait/?$")
+HOP_HEADERS = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+               "te", "trailer", "transfer-encoding", "upgrade"}
+
+
+def log(msg):
+    print(f"[gateway] {msg}", flush=True)
+
+
+def expected_auth():
+    raw = f"{USERNAME}:{PASSWORD}".encode()
+    return "Basic " + base64.b64encode(raw).decode()
+
+
+def upstream_open(method, path, headers, body, timeout=300):
+    """Open one forwarded request to opencode. Caller streams the response."""
+    conn = http_client.HTTPConnection(UPSTREAM_HOST, UPSTREAM_PORT, timeout=timeout)
+    fwd = {k: v for k, v in headers.items() if k.lower() not in HOP_HEADERS}
+    fwd["host"] = f"{UPSTREAM_HOST}:{UPSTREAM_PORT}"
+    fwd["connection"] = "close"
+    conn.request(method, path, body=body, headers=fwd)
+    return conn
+
+
+def upstream_request(method, path, headers, body, timeout=30):
+    """Forward one request to opencode. Returns (status, headers, body_bytes)."""
+    conn = http_client.HTTPConnection(UPSTREAM_HOST, UPSTREAM_PORT, timeout=timeout)
+    try:
+        fwd = {k: v for k, v in headers.items() if k.lower() not in HOP_HEADERS}
+        fwd["host"] = f"{UPSTREAM_HOST}:{UPSTREAM_PORT}"
+        fwd["connection"] = "close"
+        conn.request(method, path, body=body, headers=fwd)
+        resp = conn.getresponse()
+        data = resp.read()
+        return resp.status, dict(resp.getheaders()), data
+    finally:
+        conn.close()
+
+
+def settled(messages):
+    """True when no turn is outstanding. Walk newest-first: a finished
+    assistant turn (finish, time.completed, or error) before any user
+    message means settled; a user message first means a turn is in flight.
+    Anything else (system, model-switched) is idle."""
+    data = messages.get("data") if isinstance(messages, dict) else None
+    if not data:
+        return True
+    for m in data:
+        if not isinstance(m, dict):
+            continue
+        t = m.get("type")
+        if t == "user":
+            return False
+        if t == "assistant":
+            if m.get("finish") is not None or m.get("error") is not None:
+                return True
+            tm = m.get("time") or {}
+            if isinstance(tm, dict) and tm.get("completed") is not None:
+                return True
+            return False
+    return True
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "opencode-gateway"
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, fmt, *args):  # route through our logger
+        log(f"{self.address_string()} {fmt % args}")
+
+    def check_auth(self):
+        if not PASSWORD:
+            return False
+        got = self.headers.get("Authorization", "")
+        return hmac.compare_digest(got, expected_auth())
+
+    def send_json(self, status, obj, extra=()):
+        body = json.dumps(obj).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        for k, v in extra:
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_wait(self, session_id):
+        deadline = time.time() + WAIT_TIMEOUT
+        auth = {"Authorization": self.headers.get("Authorization", "")}
+        while True:
+            try:
+                st, _rh, data = upstream_request(
+                    "GET", f"/api/session/{session_id}/message?order=desc&limit=10",
+                    auth, None, timeout=30)
+            except Exception as e:  # upstream down: fail fast, never 503
+                log(f"wait {session_id}: upstream error: {e}")
+                self.send_json(502, {"_tag": "BadGatewayError",
+                                     "message": "opencode server is unreachable"})
+                return
+            if st == 404:
+                self.send_json(404, {"_tag": "SessionNotFoundError",
+                                     "message": f"Session not found: {session_id}"})
+                return
+            if st == 200:
+                try:
+                    if settled(json.loads(data.decode() or "{}")):
+                        self.send_response(204)
+                        self.send_header("Content-Length", "0")
+                        self.end_headers()
+                        return
+                except Exception as e:
+                    log(f"wait {session_id}: message parse error: {e}")
+            if time.time() >= deadline:
+                # Patience exhausted: answer 204 and let the caller poll
+                # messages. Never 503: the contract is poll-after-wait.
+                log(f"wait {session_id}: timeout after {WAIT_TIMEOUT}s, returning 204")
+                self.send_response(204)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            time.sleep(WAIT_POLL)
+
+    def proxy_body(self, upstream):
+        # Stream the upstream body without buffering it: a close-delimited or
+        # chunked (SSE event) body may be unbounded, so it is copied in
+        # pieces. Plain bodies keep their Content-Length.
+        length = upstream.getheader("Content-Length")
+        chunked = (upstream.getheader("Transfer-Encoding") or "").lower() == "chunked"
+        if length is not None:
+            self.send_header("Content-Length", length)
+            self.end_headers()
+            if self.command == "HEAD":
+                upstream.read()
+                return
+            remaining = int(length)
+            while remaining > 0:
+                piece = upstream.read(min(65536, remaining))
+                if not piece:
+                    break
+                remaining -= len(piece)
+                self.wfile.write(piece)
+            self.wfile.flush()
+            return
+        if chunked:
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            while True:
+                piece = upstream.read(65536)
+                if not piece:
+                    self.wfile.write(b"0\r\n\r\n")
+                    self.wfile.flush()
+                    break
+                self.wfile.write(("%x\r\n" % len(piece)).encode())
+                self.wfile.write(piece)
+                self.wfile.write(b"\r\n")
+            return
+        # Close-delimited: copy until EOF, then close our side too.
+        self.close_connection = True
+        self.end_headers()
+        while True:
+            piece = upstream.read(65536)
+            if not piece:
+                break
+            self.wfile.write(piece)
+        self.wfile.flush()
+
+    def proxy(self):
+        if self.headers.get("Upgrade"):
+            self.send_json(501, {"_tag": "NotImplementedError",
+                                 "message": "websocket upgrade is not proxied"})
+            return
+        length = self.headers.get("Content-Length")
+        body = self.rfile.read(int(length)) if length else None
+        if self.command == "POST":
+            waited = WAIT_RE.match(urllib.parse.urlsplit(self.path).path)
+            if waited:
+                self.do_wait(waited.group(1))
+                return
+        try:
+            conn = upstream_open(self.command, self.path, dict(self.headers), body)
+        except Exception as e:
+            log(f"proxy {self.command} {self.path}: upstream error: {e}")
+            self.send_json(502, {"_tag": "BadGatewayError",
+                                 "message": "opencode server is unreachable"})
+            return
+        try:
+            upstream = conn.getresponse()
+            self.send_response(upstream.status)
+            for k, v in upstream.getheaders():
+                if k.lower() in HOP_HEADERS or k.lower() in ("content-length", "transfer-encoding"):
+                    continue
+                self.send_header(k, v)
+            self.proxy_body(upstream)
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # client went away mid-stream; nothing to answer
+        except Exception as e:
+            log(f"proxy {self.command} {self.path}: stream error: {e}")
+        finally:
+            conn.close()
+
+    def handle_one(self):
+        if not self.check_auth():
+            self.send_json(401, {"_tag": "UnauthorizedError",
+                                 "message": "Authentication required"},
+                           extra=[("WWW-Authenticate", 'Basic realm="opencode"')])
+            return
+        self.proxy()
+
+    do_GET = handle_one
+    do_POST = handle_one
+    do_PUT = handle_one
+    do_PATCH = handle_one
+    do_DELETE = handle_one
+    do_HEAD = handle_one
+    do_OPTIONS = handle_one
+
+
+def wait_for_upstream(timeout=120):
+    # Do not accept external traffic until opencode answers: otherwise the
+    # first health/wait calls would 502 while the server is still booting.
+    auth = {"Authorization": expected_auth(), "Connection": "close"}
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            conn = http_client.HTTPConnection(UPSTREAM_HOST, UPSTREAM_PORT, timeout=5)
+            conn.request("GET", "/api/health", headers=auth)
+            ok = conn.getresponse().status == 200
+            conn.close()
+            if ok:
+                return True
+        except Exception:
+            pass
+        time.sleep(1)
+    return False
+
+
+def main():
+    if not PASSWORD:
+        print("[gateway] ERROR: OPENCODE_SERVER_PASSWORD is empty", file=sys.stderr)
+        sys.exit(1)
+    # Fail fast if the expected auth cannot even be built.
+    expected_auth()
+    log(f"waiting for upstream {UPSTREAM_HOST}:{UPSTREAM_PORT} ...")
+    if not wait_for_upstream():
+        # Stay up and answer 502 (never 503) while the server is down: a
+        # restart loop would only add log noise, and every request retries
+        # the upstream from scratch, so recovery is automatic.
+        log("WARN: opencode server not ready; serving 502s until it appears")
+    srv = ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), Handler)
+    srv.daemon_threads = True
+    log(f"listening on {LISTEN_HOST}:{LISTEN_PORT} -> {UPSTREAM_HOST}:{UPSTREAM_PORT} "
+        f"(wait timeout {WAIT_TIMEOUT}s, poll {WAIT_POLL}s)")
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    # Cheap self-test hook: settled() unit checks without binding a port.
+    if os.environ.get("GATEWAY_SELFTEST") == "1":
+        assert settled({"data": []}) is True
+        assert settled({"data": [{"type": "user"}]}) is False
+        assert settled({"data": [{"type": "assistant", "finish": None}]}) is False
+        assert settled({"data": [{"type": "assistant", "finish": "stop"}]}) is True
+        assert settled({"data": [{"type": "assistant", "finish": "error"}]}) is True
+        assert settled({"data": [{"type": "assistant", "finish": "stop"}, {"type": "user"}]}) is True
+        assert settled({"data": [{"type": "assistant", "time": {"completed": 1}}]}) is True
+        assert settled({"data": [{"type": "assistant", "error": {}}]}) is True
+        assert settled({"data": [{"type": "model-switched"}]}) is True
+        assert settled({"data": [{"type": "user"}, {"type": "assistant", "finish": "stop"}]}) is False
+        print("gateway selftest passed")
+    else:
+        main()

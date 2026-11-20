@@ -7,6 +7,6 @@ case "$1" in
 esac
 case "$1" in
   *[Uu]sername*) printf '%s\n' 'x-access-token' ;;
-  *[Pp]assword*) printf '%s\n' "${GITHUB_TOKEN:-}" ;;
+  *[Pp]assword*) printf '%s\n' "${FETCH_GITHUB_TOKEN:-}" ;;
   *) exit 1 ;;
 esac
