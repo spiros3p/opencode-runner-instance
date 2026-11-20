@@ -1,7 +1,24 @@
 # Optional UI port. Add this override only when ENABLE_CODE_SERVER=true.
-# Keeping it out of compose.yml means a busy host port 8222 cannot block the
+# Keeping it out of compose.yml means a busy host port 8221 cannot block the
 # headless runner from starting.
+#
+# tailscale-serve: one-shot helper that maps the VS Code port onto the
+# tailnet over HTTPS. It runs in the docker:cli image with the docker socket
+# so the socket never enters the container the opencode agent can reach.
 services:
   runner:
     ports:
-      - "${BIND_IP:-0.0.0.0}:${CODE_SERVER_PORT:-8222}:8443"
+      - "${BIND_IP:-0.0.0.0}:${CODE_SERVER_PORT:-8221}:8443"
+
+  tailscale-serve:
+    image: docker:cli
+    container_name: opencode-runner-tailscale
+    restart: "no"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./scripts/tailscale-serve:/tailscale-serve:ro
+    environment:
+      TAILSCALE_CONTAINER: "${TAILSCALE_CONTAINER:-tailscale}"
+      TAILSCALE_HTTPS_PORT: "${TAILSCALE_HTTPS_PORT:-8221}"
+      SERVE_TARGET: "${SERVE_TARGET:-8221}"
+    entrypoint: ["/bin/sh", "/tailscale-serve"]

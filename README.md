@@ -7,10 +7,10 @@ stack. Repos fetched on demand with a GitHub PAT and kept flat in `./workspace`.
 | Port (default) | Service | Auth |
 | -------------- | ------- | ---- |
 | 4096 | gateway (`scripts/opencode-gateway`): forwards to opencode on loopback, implements `POST /api/session/{id}/wait` | Basic: user `opencode`, password `OPENCODE_PASSWORD` |
-| 8222 host → 8443 container | optional VS Code (`code-server`) | Password `CODE_SERVER_PASSWORD` |
+| 8221 host → 8443 container | optional VS Code (`code-server`) | Password `CODE_SERVER_PASSWORD` |
 
 Code-server is off by default. To run it: set `ENABLE_CODE_SERVER=true` in
-`.env` and add the `compose.ui.yml` override so host port 8222 is published.
+`.env` and add the `compose.ui.yml` override so host port 8221 is published.
 The override is separate so a busy host port cannot block the headless runner.
 
 Two volumes:
@@ -31,7 +31,7 @@ curl -u opencode:"$OPENCODE_PASSWORD" http://127.0.0.1:4096/api/health
 ```
 
 Tailscale is external. Publish ports on a tailnet host (or front them with
-`tailscale serve`); do not expose 4096/8222 to the public internet.
+`tailscale serve`); do not expose 4096/8221 to the public internet.
 UI access is full control of the runner: agent user has passwordless sudo,
 so `CODE_SERVER_PASSWORD` protects provider keys and `FETCH_GITHUB_TOKEN`.
 
@@ -52,6 +52,56 @@ work in the directory it prints. An existing checkout is reused when its
 origin is the same repo, however it was cloned (https, ssh, or token URL).
 Only a genuinely different repo under the same name gets a numeric suffix;
 nothing is nested under owner or platform directories.
+
+## VS Code over Tailscale
+
+`compose.ui.yml` adds a one-shot helper container that maps the VS Code
+port onto the tailnet over HTTPS:
+
+```bash
+docker exec tailscale tailscale serve --bg --https=8221 8221
+```
+
+The helper runs that exact command in the externally managed `tailscale`
+container, so the docker socket never enters the container the opencode
+agent can reach. The helper waits up to ~120s for that container to be
+running, then prints `tailscale serve status`.
+
+```bash
+cp .env.example .env   # ENABLE_CODE_SERVER=true, CODE_SERVER_PORT=8221
+docker compose -f compose.yml -f compose.ui.yml up -d --build
+docker logs opencode-runner-tailscale
+```
+
+Knobs in `.env`:
+
+| Var | Default | Meaning |
+| --- | ------- | ------- |
+| `TAILSCALE_CONTAINER` | `tailscale` | container that owns the tailnet node |
+| `TAILSCALE_HTTPS_PORT` | `8221` | HTTPS port served on the tailnet |
+| `SERVE_TARGET` | `8221` | upstream, resolved INSIDE the tailscale container |
+| `CODE_SERVER_PORT` | `8221` | host port published to code-server |
+
+`SERVE_TARGET` matters: a bare port means the tailscale container own
+localhost (it uses host networking), so `8221` must be the published host
+port. When the tailscale container instead reaches the runner over the
+docker network, use the URL form: `SERVE_TARGET=http://opencode-runner:8443`.
+
+Check what landed: `docker exec tailscale tailscale serve status`.
+Then open `https://<runner-host>:8221` in the tailnet and sign in with the
+code-server password (`CODE_SERVER_PASSWORD`, or the one in
+`docker logs opencode-runner | grep 'code-server password'`).
+
+Troubleshooting:
+
+- Helper exits 1 with `container 'tailscale' not running`: start the
+  Tailscale container first; it is managed outside this repo.
+- Mapping works but the page does not load: the target is wrong for this
+  host. If the tailscale container has host networking, `SERVE_TARGET`
+  must equal the published `CODE_SERVER_PORT`. If it shares a docker
+  network, use `http://opencode-runner:8443`.
+- Port clash: the all-in-one stack uses 8222 on the same host, so the
+  runner defaults to 8221.
 
 ## Harness calls
 
@@ -263,6 +313,9 @@ All commands run on the runner host, never from the calling harness.
 - `docker exec opencode-runner supervisorctl start code-server` only works when
   the flag is true; enable it in `.env` and recreate the container instead.
   The UI port is published only with the `compose.ui.yml` override.
+- VS Code over the tailnet: the `compose.ui.yml` override also runs a
+  one-shot `tailscale-serve` helper that maps the VS Code port onto
+  Tailscale Serve HTTPS. See "VS Code over Tailscale" below.
 - `opencode.json` is written at boot by `scripts/opencode-config`: it holds
   `$schema`, the model, and the V1 `permission` block. A V2 `permissions` array
   from an older image is removed (original kept as `opencode.json.v2.bak`), an

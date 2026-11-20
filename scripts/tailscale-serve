@@ -1,0 +1,35 @@
+#!/bin/sh
+# Exposes the runner code-server on Tailscale Serve HTTPS.
+# Runs once per `docker compose -f compose.ui.yml up` inside the docker:cli
+# helper container, never inside the agent container: the docker socket stays
+# out of the container the opencode agent can reach.
+# Fixed command only, no user input. Never prints secrets.
+set -eu
+
+TAILSCALE_CONTAINER="${TAILSCALE_CONTAINER:-tailscale}"
+TAILSCALE_HTTPS_PORT="${TAILSCALE_HTTPS_PORT:-8221}"
+# Resolved inside the tailscale container. A bare port means its own
+# localhost (host network); use http://<container>:<port> when the tailscale
+# container reaches the runner by docker network name instead.
+SERVE_TARGET="${SERVE_TARGET:-8221}"
+WAIT_TRIES="${WAIT_TRIES:-60}"
+WAIT_SLEEP="${WAIT_SLEEP:-2}"
+
+# Wait up to ~120s for the externally managed Tailscale container.
+i=0
+while [ "$i" -lt "$WAIT_TRIES" ]; do
+    if [ "$(docker inspect -f '{{.State.Running}}' "$TAILSCALE_CONTAINER" 2>/dev/null || echo false)" = "true" ]; then
+        break
+    fi
+    i=$((i + 1))
+    sleep "$WAIT_SLEEP"
+done
+
+if [ "$(docker inspect -f '{{.State.Running}}' "$TAILSCALE_CONTAINER" 2>/dev/null || echo false)" != "true" ]; then
+    echo "error: container '$TAILSCALE_CONTAINER' not running; start the Tailscale container first" >&2
+    exit 1
+fi
+
+# Idempotent: rerunning resets the same port mapping.
+docker exec "$TAILSCALE_CONTAINER" tailscale serve --bg --https="$TAILSCALE_HTTPS_PORT" "$SERVE_TARGET"
+docker exec "$TAILSCALE_CONTAINER" tailscale serve status
