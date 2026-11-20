@@ -1,0 +1,34 @@
+services:
+  runner:
+    build: .
+    image: opencode-runner:latest
+    container_name: opencode-runner
+    restart: unless-stopped
+    stop_grace_period: 30s
+    cpus: 8
+    mem_limit: 6g
+    env_file: .env
+    cap_drop: [ NET_ADMIN, NET_RAW, SYS_PTRACE ]
+    ports:
+      - "${BIND_IP:-0.0.0.0}:${OPENCODE_PORT:-4096}:4096"
+      - "${BIND_IP:-0.0.0.0}:${PROVISIONER_PORT:-8300}:8300"
+    volumes:
+      - ./workspace:/workspace
+      - agent_home:/home/agent
+    secrets:
+      - github_deploy_key
+    logging:
+      driver: json-file
+      options: { max-size: 10m, max-file: "3" }
+
+secrets:
+  github_deploy_key:
+    file: ./secrets/github_deploy_key
+
+volumes:
+  agent_home:
+    name: opencode_runner_home
+
+networks:
+  default:
+    name: opencode_runner_default
