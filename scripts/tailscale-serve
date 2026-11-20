@@ -9,9 +9,13 @@ set -eu
 TAILSCALE_CONTAINER="${TAILSCALE_CONTAINER:-tailscale}"
 TAILSCALE_HTTPS_PORT="${TAILSCALE_HTTPS_PORT:-8221}"
 # Resolved inside the tailscale container. A bare port means its own
-# localhost (host network); use http://<container>:<port> when the tailscale
-# container reaches the runner by docker network name instead.
+# localhost (host network), so it must equal the published CODE_SERVER_PORT.
+# A URL like http://opencode-runner:8443 means docker network name.
 SERVE_TARGET="${SERVE_TARGET:-8221}"
+# Docker network the runner is on, used to attach the tailscale container
+# when SERVE_TARGET is a URL (the tailscale container is managed elsewhere).
+TAILSCALE_NETWORK="${TAILSCALE_NETWORK:-opencode_runner_default}"
+# Test knobs, not operator settings: shrink the wait in offline tests.
 WAIT_TRIES="${WAIT_TRIES:-60}"
 WAIT_SLEEP="${WAIT_SLEEP:-2}"
 
@@ -30,6 +34,16 @@ if [ "$(docker inspect -f '{{.State.Running}}' "$TAILSCALE_CONTAINER" 2>/dev/nul
     exit 1
 fi
 
+# A URL target is resolved by docker network name, so the tailscale
+# container must share a network with the runner. Attach it (idempotent:
+# already-attached is an error we ignore).
+case "$SERVE_TARGET" in
+    http://*|https://*)
+        docker network connect "$TAILSCALE_NETWORK" "$TAILSCALE_CONTAINER" 2>/dev/null || true
+        ;;
+esac
+
 # Idempotent: rerunning resets the same port mapping.
+echo "tailscale serve --https=$TAILSCALE_HTTPS_PORT $SERVE_TARGET (container $TAILSCALE_CONTAINER)"
 docker exec "$TAILSCALE_CONTAINER" tailscale serve --bg --https="$TAILSCALE_HTTPS_PORT" "$SERVE_TARGET"
 docker exec "$TAILSCALE_CONTAINER" tailscale serve status

@@ -3,6 +3,7 @@
 # and no network are needed.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
+REPO="$(cd "$HERE/.." && pwd)"
 T="$(mktemp -d)"
 trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/bin"
@@ -19,6 +20,10 @@ case "$1" in
   exec)
     shift
     printf 'exec %s\n' "$*" >> "$FAKE_DOCKER_LOG"
+    exit 0
+    ;;
+  network)
+    printf 'network %s\n' "$*" >> "$FAKE_DOCKER_LOG"
     exit 0
     ;;
 esac
@@ -58,5 +63,21 @@ if FAKE_RUNNING=false WAIT_TRIES=2 WAIT_SLEEP=0 "$HERE/tailscale-serve" >/dev/nu
 fi
 grep -q "not running" "$T/err" || fail "missing error message"
 grep -q "serve --bg" "$FAKE_DOCKER_LOG" && fail "serve ran while container was down"
+
+# 5. URL target -> tailscale container attached to the runner network
+: > "$FAKE_DOCKER_LOG"
+SERVE_TARGET=http://opencode-runner:8443 WAIT_TRIES=1 WAIT_SLEEP=0 "$HERE/tailscale-serve" >/dev/null
+grep -q "network connect opencode_runner_default tailscale" "$FAKE_DOCKER_LOG" \
+  || fail "network not attached: $(cat "$FAKE_DOCKER_LOG")"
+
+# 6. bare port target -> no network attach needed
+: > "$FAKE_DOCKER_LOG"
+WAIT_TRIES=1 WAIT_SLEEP=0 "$HERE/tailscale-serve" >/dev/null
+grep -q "network connect" "$FAKE_DOCKER_LOG" && fail "attached network for a bare port target"
+
+# 7. the port default stays the same in every file that names it
+for f in "$REPO/.env.example" "$REPO/compose.ui.yml" "$REPO/scripts/tailscale-serve" "$REPO/README.md"; do
+  grep -q "8221" "$f" || fail "$f lost the 8221 default"
+done
 
 echo "tailscale-serve tests passed"

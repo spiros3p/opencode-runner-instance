@@ -2,13 +2,18 @@
 # Keeping it out of compose.yml means a busy host port 8221 cannot block the
 # headless runner from starting.
 #
+# UI_BIND_IP defaults to 127.0.0.1: code-server is full control of the
+# runner (the agent user has passwordless sudo), so it stays off the LAN.
+# A host-networking tailscale container reaches it through the host loopback.
+# Set UI_BIND_IP=0.0.0.0 only if the LAN really needs the editor.
+#
 # tailscale-serve: one-shot helper that maps the VS Code port onto the
 # tailnet over HTTPS. It runs in the docker:cli image with the docker socket
 # so the socket never enters the container the opencode agent can reach.
 services:
   runner:
     ports:
-      - "${BIND_IP:-0.0.0.0}:${CODE_SERVER_PORT:-8221}:8443"
+      - "${UI_BIND_IP:-127.0.0.1}:${CODE_SERVER_PORT:-8221}:8443"
 
   tailscale-serve:
     image: docker:cli
@@ -21,4 +26,5 @@ services:
       TAILSCALE_CONTAINER: "${TAILSCALE_CONTAINER:-tailscale}"
       TAILSCALE_HTTPS_PORT: "${TAILSCALE_HTTPS_PORT:-8221}"
       SERVE_TARGET: "${SERVE_TARGET:-8221}"
+      TAILSCALE_NETWORK: "${TAILSCALE_NETWORK:-opencode_runner_default}"
     entrypoint: ["/bin/sh", "/tailscale-serve"]

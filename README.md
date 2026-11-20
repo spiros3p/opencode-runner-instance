@@ -7,7 +7,7 @@ stack. Repos fetched on demand with a GitHub PAT and kept flat in `./workspace`.
 | Port (default) | Service | Auth |
 | -------------- | ------- | ---- |
 | 4096 | gateway (`scripts/opencode-gateway`): forwards to opencode on loopback, implements `POST /api/session/{id}/wait` | Basic: user `opencode`, password `OPENCODE_PASSWORD` |
-| 8221 host → 8443 container | optional VS Code (`code-server`) | Password `CODE_SERVER_PASSWORD` |
+| 8221 host → 8443 container | optional VS Code (`code-server`), loopback only | Password `CODE_SERVER_PASSWORD` |
 
 Code-server is off by default. To run it: set `ENABLE_CODE_SERVER=true` in
 `.env` and add the `compose.ui.yml` override so host port 8221 is published.
@@ -31,7 +31,8 @@ curl -u opencode:"$OPENCODE_PASSWORD" http://127.0.0.1:4096/api/health
 ```
 
 Tailscale is external. Publish ports on a tailnet host (or front them with
-`tailscale serve`); do not expose 4096/8221 to the public internet.
+`tailscale serve`); do not expose 4096/8221 to the public internet. VS Code
+publishes on loopback unless you set `UI_BIND_IP=0.0.0.0`.
 UI access is full control of the runner: agent user has passwordless sudo,
 so `CODE_SERVER_PASSWORD` protects provider keys and `FETCH_GITHUB_TOKEN`.
 
@@ -81,11 +82,25 @@ Knobs in `.env`:
 | `TAILSCALE_HTTPS_PORT` | `8221` | HTTPS port served on the tailnet |
 | `SERVE_TARGET` | `8221` | upstream, resolved INSIDE the tailscale container |
 | `CODE_SERVER_PORT` | `8221` | host port published to code-server |
+| `UI_BIND_IP` | `127.0.0.1` | where VS Code is published; loopback keeps it off the LAN |
+| `TAILSCALE_NETWORK` | `opencode_runner_default` | docker network used for the URL target form |
 
-`SERVE_TARGET` matters: a bare port means the tailscale container own
-localhost (it uses host networking), so `8221` must be the published host
-port. When the tailscale container instead reaches the runner over the
-docker network, use the URL form: `SERVE_TARGET=http://opencode-runner:8443`.
+`SERVE_TARGET` is resolved inside the tailscale container, and it must
+match what that container can reach:
+
+- Bare port (default `8221`) means the tailscale container own localhost,
+  so the tailscale container must use host networking, and `8221` must be
+  the published host port. Keep `SERVE_TARGET` equal to
+  `CODE_SERVER_PORT`.
+- URL form (`SERVE_TARGET=http://opencode-runner:8443`) means docker
+  network name. The tailscale container is managed outside this repo, so it
+  is not on the runner network by default. The helper attaches it on every
+  up (`docker network connect opencode_runner_default tailscale`,
+  idempotent); to do it by hand:
+
+  ```bash
+  docker network connect opencode_runner_default tailscale
+  ```
 
 Check what landed: `docker exec tailscale tailscale serve status`.
 Then open `https://<runner-host>:8221` in the tailnet and sign in with the
@@ -315,7 +330,7 @@ All commands run on the runner host, never from the calling harness.
   The UI port is published only with the `compose.ui.yml` override.
 - VS Code over the tailnet: the `compose.ui.yml` override also runs a
   one-shot `tailscale-serve` helper that maps the VS Code port onto
-  Tailscale Serve HTTPS. See "VS Code over Tailscale" below.
+  Tailscale Serve HTTPS. See "VS Code over Tailscale" above.
 - `opencode.json` is written at boot by `scripts/opencode-config`: it holds
   `$schema`, the model, and the V1 `permission` block. A V2 `permissions` array
   from an older image is removed (original kept as `opencode.json.v2.bak`), an
