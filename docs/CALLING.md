@@ -52,10 +52,14 @@ Useful endpoints:
 - `POST /api/session/{id}/agent` — switch agent mid-session. Body
   `{"agent":"..."}` (e.g. `build` vs read-only `plan`).
 - `GET /api/session/{id}/permission`, `GET /api/session/{id}/question` —
-  list pending approval/question requests; answer via
-  `POST .../permission/{requestID}/reply` (`once|always|reject`) or the
-  question `reply`/`reject` routes. A headless caller polls these when a
-  turn stalls instead of auto-answering. Shapes: `GET /doc`.
+  list pending approval/question requests (`{"data":[...]}`). Answer with:
+  - permission: `POST .../permission/{requestID}/reply` body
+    `{"reply":"once"|"always"|"reject"}`
+  - question: `POST .../question/{requestID}/reply` body
+    `{"answers":[{"value":"..."}]}` (one entry per question, in order), or
+    `POST .../question/{requestID}/reject` with no body.
+  A headless caller polls these when a turn stalls instead of
+  auto-answering. Exact shapes: `GET /doc`.
 - `POST /api/session/{id}/wait` — block until the turn settles (gateway polls
   messages, then 204). Answers 204 on timeout too: always confirm via
   `GET .../message` until a `COMPLETE` assistant reply (`time.completed` or
@@ -180,6 +184,14 @@ Keep runner and repo configs deny-based.
 ## Review handoff
 
 Reviews stay local. To review remote work: `GET .../message` for the final
-assistant text and `GET /vcs/diff?directory=<dir>&mode=git` for the patch,
-apply the diff to a local worktree (`git apply --check` first), then run the
-normal local review lane. The runner never merges.
+assistant text, then the patch:
+
+- `GET /vcs/diff?directory=<dir>&mode=git` — JSON array of
+  `{file, patch, additions, deletions, status}`; the per-file `patch` field
+  holds that file diff.
+- `GET /vcs/diff/raw?directory=<dir>` — the whole diff as `text/x-diff`,
+  ready for `git apply` (no `mode` parameter). Use this one to apply:
+  `curl ... > patch.diff && git apply --check patch.diff`.
+
+Apply to a local worktree, then run the normal local review lane. The runner
+never merges.

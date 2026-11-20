@@ -22,8 +22,8 @@ echo "session: $SESSION"
 if [ -n "${OPENCODE_MODEL:-}" ]; then
   PROV="${OPENCODE_MODEL%%/*}"; MID="${OPENCODE_MODEL#*/}"
   MBODY="$(jq -nc --arg p "$PROV" --arg i "$MID" --arg v "${OPENCODE_VARIANT:-}" '{model: ({providerID:$p,id:$i} + if $v=="" then {} else {variant:$v} end)}')"
-  curl -fsS -X POST "$OC/api/session/$SESSION/model"
-    -u "opencode:$OPENCODE_PASSWORD" -H 'Content-Type: application/json'
+  curl -fsS -X POST "$OC/api/session/$SESSION/model" \
+    -u "opencode:$OPENCODE_PASSWORD" -H 'Content-Type: application/json' \
     -d "$MBODY" >/dev/null
   echo "model: $OPENCODE_MODEL"
 fi

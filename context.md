@@ -9,7 +9,10 @@ touch the runner host, its `.env`, or its secrets.
 
 - Base URL `http://192.168.1.81:4096`, Basic auth user `opencode`, password
   from your secret store (`OPENCODE_RUNNER_PASSWORD` /
-  `~/.config/freddo-buddy/opencode-runner.env`, 0600). Never print it.
+  `~/.config/freddo-buddy/opencode-runner.env`). Never print it.
+  That file MUST be `0600` and owned by you; it was found `root:root 0644`
+  (world-readable) and the owner still has to fix it. Assume it is exposed
+  until you have verified `ls -l` yourself.
 - Port 4096 is a gateway: it forwards everything to opencode and implements
   `POST /api/session/{id}/wait` (upstream leaves it a 503 stub). Wait
   answers **204 when the turn settles, 204 on timeout** — always poll
@@ -40,11 +43,17 @@ touch the runner host, its `.env`, or its secrets.
 - `GET /vcs/diff?directory=<dir>&mode=git` (URL-encode directory).
 - Stall diagnosis (no auto-approve, ever): `GET
   /api/session/{id}/permission` and `GET /api/session/{id}/question` list
-  pending requests; answer via `POST .../permission/{id}/reply`
-  (`once|always|reject`) or question `reply`/`reject`. Keep prompts
-deny-based.
-- Review handoff: runner never merges. Read final text + diff, apply
-  locally (`git apply --check`), review with the local review lane.
+  pending requests (`{"data":[...]}`). Answer permission with
+  `POST .../permission/{id}/reply` body `{"reply":"once"|"always"|"reject"}`;
+  answer question with `POST .../question/{id}/reply` body
+  `{"answers":[{"value":"..."}]}` (one per question, in order), or
+  `POST .../question/{id}/reject` with no body. Keep prompts deny-based.
+- Review handoff: runner never merges. Final text from `GET .../message`.
+  Patch for applying: `GET /vcs/diff/raw?directory=<dir>` returns the whole
+  diff as `text/x-diff` (no `mode` param), so `git apply` ready. `GET
+  /vcs/diff?directory=<dir>&mode=git` is only a JSON summary
+  (`{file, patch, additions, deletions, status}` per file); do not try to
+  `git apply` that JSON. Apply locally, then review with the local lane.
 
 ## 3. Your work items (in order)
 
