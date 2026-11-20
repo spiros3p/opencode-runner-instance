@@ -2,7 +2,7 @@
 # Headless opencode runner. Native opencode HTTP server + flat repo helper.
 # Optional browser VS Code (off by default). No second harness, no web-search
 # stack.
-FROM node:24-bookworm-slim
+FROM node:26-bookworm-slim
 
 ENV LANG=C.UTF-8 TZ=Europe/Athens \
      ENABLE_CODE_SERVER=false
