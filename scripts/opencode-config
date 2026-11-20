@@ -1,0 +1,216 @@
+#!/usr/bin/env python3
+"""Seed or repair the opencode config for a headless runner.
+
+opencode 1.x (V1) rejects the V2 `permissions` array and then refuses to
+start. This script keeps the config valid and headless-safe:
+
+  * writes a fresh config when none exists (model + V1 `permission` block)
+  * strips V2 `permissions` keys (top level or nested in agent blocks)
+  * adds the V1 `permission` defaults that stop approval prompts hanging a
+    headless session, without overriding rules the operator set
+  * keeps every other key, so provider/theme settings survive
+  * never fails the boot: a broken config is backed up and replaced
+
+Prints one status line on stdout. Warnings go to stderr.
+"""
+import json
+import os
+import sys
+
+SCHEMA = "https://opencode.ai/config.json"
+
+# V1 defaults that keep a headless session from blocking on an approval.
+# read: *.env asks by default in opencode 1.x -> deny it outright.
+# doom_loop: asks by default -> deny, so a stuck loop errors instead of hanging.
+# external_directory: asks outside the session dir -> allow, this is a
+# dedicated runner and the agent already has passwordless sudo.
+DEFAULTS = {
+    "read": {
+        "*": "allow",
+        "*.env": "deny",
+        "*.env.*": "deny",
+        "*.env.example": "allow",
+    },
+    "doom_loop": "deny",
+    "external_directory": "allow",
+}
+
+
+def strip_jsonc(text):
+    """Drop // and /* */ comments and trailing commas, respecting strings."""
+    out = []
+    i = 0
+    n = len(text)
+    in_str = False
+    esc = False
+    while i < n:
+        c = text[i]
+        if in_str:
+            out.append(c)
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+            i += 1
+            continue
+        if c == '"':
+            in_str = True
+            out.append(c)
+            i += 1
+            continue
+        if c == "/" and i + 1 < n and text[i + 1] == "/":
+            while i < n and text[i] != "\n":
+                i += 1
+            continue
+        if c == "/" and i + 1 < n and text[i + 1] == "*":
+            i += 2
+            while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
+                i += 1
+            i += 2
+            continue
+        if c in "}]":
+            j = len(out) - 1
+            while j >= 0 and out[j].isspace():
+                j -= 1
+            if j >= 0 and out[j] == ",":
+                del out[j]
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def strip_v2(node):
+    """Remove every V2 `permissions` key. Returns True if one was found."""
+    found = False
+    if isinstance(node, dict):
+        if "permissions" in node:
+            del node["permissions"]
+            found = True
+        for value in node.values():
+            found = strip_v2(value) or found
+    elif isinstance(node, list):
+        for value in node:
+            found = strip_v2(value) or found
+    return found
+
+
+def merge_permission(cfg):
+    """Add missing V1 permission defaults. Operator rules win.
+
+    opencode uses the LAST matching rule, so defaults go first and the
+    operator's own patterns go last.
+    """
+    perm = cfg.get("permission")
+    if isinstance(perm, str):
+        return
+    if not isinstance(perm, dict):
+        cfg["permission"] = json.loads(json.dumps(DEFAULTS))
+        return
+    for key, value in DEFAULTS.items():
+        current = perm.get(key)
+        if current is None:
+            perm[key] = json.loads(json.dumps(value))
+        elif isinstance(current, dict) and isinstance(value, dict):
+            merged = {k: v for k, v in value.items() if k not in current}
+            merged.update(current)
+            perm[key] = merged
+
+
+def fresh_config(model):
+    cfg = {"$schema": SCHEMA}
+    if model:
+        cfg["model"] = model
+    merge_permission(cfg)
+    return cfg
+
+
+def write(path, cfg):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, path)
+
+
+def backup(path, suffix):
+    try:
+        os.replace(path, path + suffix)
+        return True
+    except OSError:
+        return False
+
+
+def main():
+    if len(sys.argv) != 2:
+        print("usage: opencode-config <config-path>", file=sys.stderr)
+        return 0
+    path = sys.argv[1]
+    model = os.environ.get("OPENCODE_MODEL", "").strip()
+
+    if not os.path.exists(path):
+        write(path, fresh_config(model))
+        print("created %s" % path)
+        return 0
+
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+        text = raw.decode("utf-8-sig", errors="replace")
+    except OSError as e:
+        print("WARN: cannot read %s: %s" % (path, e), file=sys.stderr)
+        print("unreadable %s" % path)
+        return 0
+
+    try:
+        cfg = json.loads(strip_jsonc(text))
+    except ValueError as e:
+        print("WARN: %s is not valid JSON(C): %s" % (path, e), file=sys.stderr)
+        if backup(path, ".invalid"):
+            write(path, fresh_config(model))
+            print("replaced invalid config (backup: %s.invalid)" % path)
+        else:
+            print("invalid config left in place")
+        return 0
+
+    if not isinstance(cfg, dict):
+        print("WARN: %s is not a JSON object" % path, file=sys.stderr)
+        if backup(path, ".invalid"):
+            write(path, fresh_config(model))
+            print("replaced non-object config (backup: %s.invalid)" % path)
+        return 0
+
+    had_v2 = strip_v2(cfg)
+    if had_v2:
+        backup(path, ".v2.bak")
+    changed = had_v2
+
+    before = json.dumps(cfg.get("permission"), sort_keys=True)
+    merge_permission(cfg)
+    if json.dumps(cfg.get("permission"), sort_keys=True) != before:
+        changed = True
+
+    if model:
+        if "model" not in cfg:
+            cfg["model"] = model
+            changed = True
+        elif cfg.get("model") != model:
+            print(
+                "note: OPENCODE_MODEL=%s ignored; %s sets model=%s"
+                % (model, path, cfg.get("model")),
+                file=sys.stderr,
+            )
+
+    if changed:
+        if not had_v2:
+            backup(path, ".bak")
+        write(path, cfg)
+        print("updated %s%s" % (path, " (v2 permissions removed)" if had_v2 else ""))
+    else:
+        print("ok %s" % path)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

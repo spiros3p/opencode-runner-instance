@@ -27,7 +27,7 @@ docker compose up -d --build
 # optional UI: set ENABLE_CODE_SERVER=true in .env, then use:
 # docker compose -f compose.yml -f compose.ui.yml up -d --build
 docker logs opencode-runner 2>&1 | tail -20
-curl -u opencode:"$OPENCODE_PASSWORD" http://127.0.0.1:4096/api/info
+curl -u opencode:"$OPENCODE_PASSWORD" http://127.0.0.1:4096/api/health
 ```
 
 Tailscale is external. Publish ports on a tailnet host (or front them with
@@ -59,21 +59,108 @@ sequence in `docs/CALLING.md`; runnable script in `examples/call.sh`.
 Short version:
 
 ```bash
-# 1. session in the fetched directory
+# 1. session in the fetched directory (response: {"data":{"id":"ses_..."}})
 curl -fsS -X POST http://127.0.0.1:4096/api/session \
   -u "opencode:$OPENCODE_PASSWORD" -H 'Content-Type: application/json' \
-  -d '{"location":{"directory":"/workspace/repo"},"title":"task"}'
+  -d '{"location":{"directory":"/workspace/repo"}}'
 
 # 2. prompt, wait, read assistant messages
-#    POST /api/session/{id}/prompt
-#    POST /api/experimental/session/{id}/wait
-#    GET  /api/session/{id}/message?order=desc&limit=10
+#    POST /api/session/{id}/prompt      body: {"prompt":{"text":"..."}}
+#    POST /api/session/{id}/wait
+#    GET  /api/session/{id}/message?order=desc&limit=10   -> {"data":[...]}
+#    GET  /vcs/diff?directory=/workspace/repo&mode=git
 ```
 
 `@opencode/client` works too; see `docs/CALLING.md`.
 
-Provider keys: set in `.env` or add at runtime through `/api/credential` and
-`/api/integration/{id}/connect/key`. Config changes apply without restart.
+### Choosing a model
+
+The caller may pick the model per session, but the runner holds the provider
+keys, so only models the runner can serve are usable:
+
+```bash
+# omit "model" -> the runner's configured default (OPENCODE_MODEL)
+curl -fsS -X POST http://127.0.0.1:4096/api/session \
+  -u "opencode:$OPENCODE_PASSWORD" -H 'Content-Type: application/json' \
+  -d '{"location":{"directory":"/workspace/repo"}}'
+
+# explicit model
+curl -fsS -X POST http://127.0.0.1:4096/api/session \
+  -u "opencode:$OPENCODE_PASSWORD" -H 'Content-Type: application/json' \
+  -d '{"location":{"directory":"/workspace/repo"},
+       "model":{"providerID":"opencode-go","id":"deepseek-v4-pro"}}'
+
+# switch model on a live session
+curl -fsS -X POST http://127.0.0.1:4096/api/session/$SESSION/model \
+  -u "opencode:$OPENCODE_PASSWORD" -H 'Content-Type: application/json' \
+  -d '{"model":{"providerID":"opencode-go","id":"deepseek-v4-pro"}}'
+
+# what the runner can actually serve
+curl -fsS http://127.0.0.1:4096/api/model -u "opencode:$OPENCODE_PASSWORD"
+```
+
+A model whose provider has no key on the runner fails with
+`Model unavailable: provider/model`. The caller cannot pass a key at call
+time.
+
+## Provider credentials
+
+The runner passes `.env` straight into the opencode server process, so any
+provider env var opencode knows works. The env var name comes from the
+provider catalog (models.dev):
+
+| Provider id | Env var | Notes |
+| ----------- | ------- | ----- |
+| `opencode` | `OPENCODE_API_KEY` | OpenCode Console, pay per token |
+| `opencode-go` | `OPENCODE_API_KEY` | OpenCode Go subscription |
+| `anthropic` | `ANTHROPIC_API_KEY` | |
+| `openai` | `OPENAI_API_KEY` | |
+| `google` | `GEMINI_API_KEY` | |
+| `openrouter` | `OPENROUTER_API_KEY` | |
+| `deepseek` | `DEEPSEEK_API_KEY` | |
+
+One key in `.env`:
+
+```bash
+OPENCODE_API_KEY=sk-...
+OPENCODE_MODEL=opencode-go/deepseek-v4-pro
+```
+
+`OPENCODE_API_KEY` is shared by `opencode` and `opencode-go`, so one env var
+covers one of them at a time. For two keys at once, put them in the config
+instead and reference them with `{env:VAR}`:
+
+```jsonc
+// /home/agent/.config/opencode/opencode.json
+{
+  "model": "opencode-go/deepseek-v4-pro",
+  "provider": {
+    "opencode-go": { "options": { "apiKey": "{env:OPENCODE_GO_KEY}" } },
+    "opencode": { "options": { "apiKey": "{env:OPENCODE_CONSOLE_KEY}" } }
+  }
+}
+```
+
+Then add both vars to `.env`. The key never lands in the file itself.
+
+Apply and verify:
+
+```bash
+docker compose up -d --force-recreate      # env_file changes need a recreate
+docker exec -u agent opencode-runner opencode models opencode-go | head
+```
+
+`opencode models <provider>` lists what the runner can actually reach. The
+first prompt after adding a key fails if the model id is wrong.
+
+Keys can also be stored by opencode itself in
+`/home/agent/.local/share/opencode/auth.json` (inside the home volume) via
+`opencode providers`, or at runtime with
+`POST /api/integration/{providerID}/connect/key` body `{"key":"..."}`. Env is
+the simple path; the stored path keeps the key out of the container env.
+
+Provider keys are visible to the agent shell (`env`) and to anything with
+sudo. Scope and rotate them like the GitHub PAT.
 
 ## Delegate from another harness
 
@@ -93,13 +180,16 @@ For each delegated task:
    and idempotent). Create a session at /workspace and prompt the runner agent:
    "Run `fetch-repo <owner/repo> [ref]` and reply with the printed directory."
    Use that path as <dir>. There is no repo-listing API.
-2. POST /api/session with {"location":{"directory":"<dir>"},"title":"<title>"}.
-   Save the returned session id.
-3. POST /api/session/{id}/prompt with the task text.
-4. POST /api/experimental/session/{id}/wait.
+2. POST /api/session with {"location":{"directory":"<dir>"}}. Read the session
+   id from the response field data.id. Do not send a "model" field: the runner
+   uses its own configured default. If a task needs a specific model, first
+   GET /api/model and use one the runner lists there, then
+   POST /api/session/{id}/model with {"model":{"providerID":"...","id":"..."}}.
+3. POST /api/session/{id}/prompt with body {"prompt":{"text":"<task>"}}.
+4. POST /api/session/{id}/wait.
 5. GET /api/session/{id}/message?order=desc&limit=10 and
-   GET /api/session/{id}/diff. Report the final assistant message and file
-   diffs to me.
+   GET /vcs/diff?directory=<dir>&mode=git. Report the final assistant message
+   and the diff to me.
 
 All repos stay flat under /workspace. Do not clone locally. Do not ask the
 runner for its PAT. Do not commit or push unless the task says so.
@@ -118,8 +208,9 @@ Plain `docker compose up -d` reuses the old image. Rebuild required.
 
 ## Notes
 
-- Default opencode policy allows tools; `.env` reads are denied so headless
-  sessions never wait on an approval prompt for provider keys.
+- `OPENCODE_PASSWORD` is exported to the server as `OPENCODE_SERVER_PASSWORD`
+  at boot; the Basic auth username defaults to `opencode`
+  (`OPENCODE_SERVER_USERNAME`).
 - `GITHUB_TOKEN` is a PAT in env, visible to the agent shell and to anything
   with sudo. Scope it to the repos this runner may work on and rotate it.
 - Migrating from the old deploy key: delete `secrets/github_deploy_key` and
@@ -129,7 +220,15 @@ Plain `docker compose up -d` reuses the old image. Rebuild required.
 - `docker exec opencode-runner supervisorctl start code-server` only works when
   the flag is true; enable it in `.env` and recreate the container instead.
   The UI port is published only with the `compose.ui.yml` override.
-- Seeds are once-only. Delete `$HOME/.config/opencode/opencode.json` to re-seed
-  with a new `OPENCODE_MODEL`; this discards manual edits there.
+- `opencode.json` is written at boot by `scripts/opencode-config`: it holds
+  `$schema`, the model, and the V1 `permission` block. A V2 `permissions` array
+  from an older image is removed (original kept as `opencode.json.v2.bak`), an
+  unparseable file is kept as `opencode.json.invalid`, and every other key you
+  added is preserved.
+- To change the model, set `OPENCODE_MODEL` in `.env` and remove the `model`
+  key from `opencode.json` (or edit it in place). A model already in the file
+  wins; the runner logs the mismatch instead of overwriting your choice.
 - Permission crashes: entrypoint re-chowns home every boot. Live repair:
   `docker exec opencode-runner bash -c 'chown -R agent:agent /home/agent && chmod -R u+rwX,go-rwx /home/agent'`.
+- Tests: `scripts/test-fetch-repo.sh` and `scripts/test-opencode-config.sh`
+  run locally with no network and no container.

@@ -29,28 +29,59 @@ DIR=/workspace/repo
 
 SESSION=$(curl -fsS -X POST "$BASE/api/session" -u "$AUTH" \
   -H 'Content-Type: application/json' \
-  -d "{\"location\":{\"directory\":\"$DIR\"},\"title\":\"task\"}" | jq -r .id)
+  -d "{\"location\":{\"directory\":\"$DIR\"}}" | jq -r .data.id)
 
 curl -fsS -X POST "$BASE/api/session/$SESSION/prompt" -u "$AUTH" \
   -H 'Content-Type: application/json' \
-  -d '{"text":"Fix the failing login test and open a PR."}' >/dev/null
+  -d "$(jq -nc --rawfile text "$TASK" '{prompt:{text:$text}}')" >/dev/null
 
-curl -fsS -X POST "$BASE/api/experimental/session/$SESSION/wait" -u "$AUTH" >/dev/null
+curl -fsS -X POST "$BASE/api/session/$SESSION/wait" -u "$AUTH" >/dev/null
 
 curl -fsS "$BASE/api/session/$SESSION/message?order=desc&limit=10" -u "$AUTH" | jq '.data'
 ```
 
 Useful endpoints:
 - `POST /api/session` — create session at a location (`location.directory`).
-- `POST /api/session/{id}/prompt` — admit one user message.
+  Response is `{"data":{"id":"ses_..."}}`.
+- `POST /api/session/{id}/prompt` — admit one user message. Body is
+  `{"prompt":{"text":"..."}}`.
 - `POST /api/session/{id}/interrupt` — stop an active run.
-- `POST /api/experimental/session/{id}/wait` — block until idle.
-- `GET /api/session/{id}/message` — read turn history.
-- `GET /api/session/{id}/diff` — per-turn file diffs.
-- `GET /api/project`, `GET /api/agent`, `GET /api/model/default` — discovery.
-- `GET /openapi.json` — full contract on the running server.
+- `POST /api/session/{id}/wait` — block until the agent loop is idle.
+- `GET /api/session/{id}/message` — read turn history, `{"data":[...]}`.
+- `GET /vcs/diff?directory=<dir>&mode=git` — working tree diff.
+- `GET /api/agent`, `GET /api/model` — discovery.
+- `GET /doc` — full API contract on the running server.
 
-## 3. JavaScript client
+## 3. Choosing a model
+
+The runner owns the provider keys, so the caller can only select models the
+runner can serve.
+
+```bash
+# default: omit "model", the session uses the runner's configured model
+curl -fsS -X POST "$BASE/api/session" -u "$AUTH" \
+  -H 'Content-Type: application/json' \
+  -d "{\"location\":{\"directory\":\"$DIR\"}}"
+
+# explicit model, on create or on a live session
+curl -fsS -X POST "$BASE/api/session" -u "$AUTH" \
+  -H 'Content-Type: application/json' \
+  -d "{\"location\":{\"directory\":\"$DIR\"},
+       \"model\":{\"providerID\":\"opencode-go\",\"id\":\"deepseek-v4-pro\"}}"
+
+curl -fsS -X POST "$BASE/api/session/$SESSION/model" -u "$AUTH" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":{"providerID":"opencode-go","id":"deepseek-v4-pro"}}'
+
+# what the runner can serve
+curl -fsS "$BASE/api/model" -u "$AUTH"
+```
+
+Model ref is `{providerID, id, variant?}`. A provider with no key on the
+runner is inactive and the turn fails with `Model unavailable: provider/model`.
+Keys cannot be passed per call.
+
+## 4. JavaScript client
 
 ```ts
 import { OpenCode } from "@opencode/client"
@@ -74,7 +105,7 @@ await client.session.wait({ sessionID: session.id })
 For message reads, use `GET /api/session/{id}/message` (or the matching method
 in the generated client — names mirror `/openapi.json` operation IDs).
 
-## 4. Configure providers after boot
+## 5. Configure providers after boot
 
 Provider keys can be added at runtime without a rebuild:
 
@@ -87,11 +118,32 @@ curl -fsS -X POST "$BASE/api/integration/anthropic/connect/key" -u "$AUTH" \
 Replace `anthropic` with the provider's integration ID. Check available IDs
 with `GET /api/integration`.
 
-Or set provider env vars in `.env` and rebuild. Never commit keys.
+Or set provider env vars in `.env` and recreate the container. The common
+ones: `OPENCODE_API_KEY` (OpenCode Console and OpenCode Go),
+`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`,
+`OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`. Pick the model with
+`OPENCODE_MODEL=opencode-go/<model-id>` or `provider/model-id` in the task.
+
+Never commit keys.
 
 ## Permissions
 
-Default policy allows actions except reading `*.env` and `*.env.*` (denied).
-If a caller adds an `ask` rule in the repo's own `opencode.json`, the harness
-must answer permission requests through the API; headless runs will otherwise
-stall. Keep runner config deny-based only.
+The runner writes a V1 `permission` block into
+`/home/agent/.config/opencode/opencode.json` so a headless session never
+blocks on an approval:
+
+- `read` — `*.env` and `*.env.*` denied, `*.env.example` allowed
+- `doom_loop` — denied, so a stuck loop errors instead of hanging
+- `external_directory` — allowed, this is a dedicated runner
+
+Operator rules in that file win over these defaults. A repo's own
+`opencode.json` can add `ask` rules; a headless harness must then answer
+through the permission API or the run stalls:
+
+```bash
+curl -fsS -X POST "$BASE/api/session/$SESSION/permission/$REQUEST_ID/reply" \
+  -u "$AUTH" -H 'Content-Type: application/json' \
+  -d '{"reply":"once"}'   # once | always | reject
+```
+
+Keep runner and repo configs deny-based.

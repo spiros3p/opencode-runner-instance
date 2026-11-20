@@ -13,14 +13,14 @@ TASK="${2:?usage: call.sh <runner-directory> <task-prompt-file>}"
 
 SESSION=$(curl -fsS -X POST "$OC/api/session" \
   -u "opencode:$OPENCODE_PASSWORD" -H 'Content-Type: application/json' \
-  -d "$(jq -nc --arg d "$DIR" '{location:{directory:$d},title:"runner task"}')" | jq -r .id)
+  -d "$(jq -nc --arg d "$DIR" '{location:{directory:$d}}')" | jq -r .data.id)
 echo "session: $SESSION"
 
 curl -fsS -X POST "$OC/api/session/$SESSION/prompt" \
   -u "opencode:$OPENCODE_PASSWORD" -H 'Content-Type: application/json' \
-  -d "$(jq -nc --rawfile text "$TASK" '{text:$text}')" >/dev/null
+  -d "$(jq -nc --rawfile text "$TASK" '{prompt:{text:$text}}')" >/dev/null
 
-curl -fsS -X POST "$OC/api/experimental/session/$SESSION/wait" \
+curl -fsS -X POST "$OC/api/session/$SESSION/wait" \
   -u "opencode:$OPENCODE_PASSWORD" >/dev/null
 
 curl -fsS "$OC/api/session/$SESSION/message?order=desc&limit=10" \

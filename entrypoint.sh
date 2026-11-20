@@ -14,7 +14,12 @@ case "$OP_PASSWORD" in
     exit 1
     ;;
 esac
+# opencode's native server reads these names. Keep OPENCODE_PASSWORD as the
+# .env-facing name and map it, so callers use the documented variable.
+export OPENCODE_SERVER_PASSWORD="${OPENCODE_SERVER_PASSWORD:-$OP_PASSWORD}"
+export OPENCODE_SERVER_USERNAME="${OPENCODE_SERVER_USERNAME:-opencode}"
 unset OP_PASSWORD
+log "opencode auth: user $OPENCODE_SERVER_USERNAME, password set"
 log "github pat: $([ -n "${GITHUB_TOKEN:-}" ] && echo set || echo unset)"
 
 # code-server is opt-in. Normalize once so supervisord always gets true/false;
@@ -49,39 +54,24 @@ git config --system --add safe.directory '*'
 runuser -u agent -- env HOME="$H" git config --global user.name  "${GIT_IDENTITY_NAME:-Agent}"
 runuser -u agent -- env HOME="$H" git config --global user.email "${GIT_IDENTITY_EMAIL:-agent@localhost}"
 
-# Native opencode config. Seeded once, never overwrites edits. Default policy
-# already allows actions except .env reads; deny those so headless tasks never
-# hang on an approval prompt for provider keys.
+# Owner-only everywhere. Kills EACCES crash loops and satisfies secret checks.
+# Runs before the config helper so a root-owned config is still readable.
+chown -R agent:agent "$H"
+chmod -R u+rwX,go-rwx "$H"
+
+# Native opencode config. The image pins opencode 1.x, which rejects the V2
+# `permissions` array and then refuses to start. The helper repairs that,
+# keeps the operator's own keys, and adds the V1 permission defaults that stop
+# a headless session from blocking on an approval prompt.
 install -d -o agent -g agent -m 700 "$H/.config/opencode"
-if [ ! -f "$H/.config/opencode/opencode.json" ]; then
-  if [ -n "${OPENCODE_MODEL:-}" ]; then
-    cat > "$H/.config/opencode/opencode.json" <<EOF
-{
-  "\$schema": "https://opencode.ai/config.json",
-  "model": "$OPENCODE_MODEL",
-  "permissions": [
-    { "action": "read", "resource": "*.env", "effect": "deny" },
-    { "action": "read", "resource": "*.env.*", "effect": "deny" },
-    { "action": "read", "resource": "*.env.example", "effect": "allow" }
-  ]
-}
-EOF
-  else
-    cat > "$H/.config/opencode/opencode.json" <<'EOF'
-{
-  "$schema": "https://opencode.ai/config.json",
-  "permissions": [
-    { "action": "read", "resource": "*.env", "effect": "deny" },
-    { "action": "read", "resource": "*.env.*", "effect": "deny" },
-    { "action": "read", "resource": "*.env.example", "effect": "allow" }
-  ]
-}
-EOF
-  fi
-  log "seeded $H/.config/opencode/opencode.json (delete it to re-seed)"
+OC_CFG="$H/.config/opencode/opencode.json"
+if ! OC_OUT="$(runuser -u agent -- env HOME="$H" OPENCODE_MODEL="${OPENCODE_MODEL:-}" \
+  /usr/bin/python3 /usr/local/bin/opencode-config "$OC_CFG" 2>&1)"; then
+  log "WARN: opencode config helper failed: $OC_OUT"
+else
+  [ -n "$OC_OUT" ] && log "opencode config: $OC_OUT"
 fi
 
-# Owner-only everywhere. Kills EACCES crash loops and satisfies secret checks.
 chown -R agent:agent "$H"
 chmod -R u+rwX,go-rwx "$H"
 

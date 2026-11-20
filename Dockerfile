@@ -45,8 +45,10 @@ RUN CS_ARCH="$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')" \
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY scripts/fetch-repo /usr/local/bin/fetch-repo
 COPY scripts/git-askpass /usr/local/bin/git-askpass
+COPY scripts/opencode-config /usr/local/bin/opencode-config
 COPY config/supervisord.conf /etc/supervisor/supervisord.conf
-RUN chmod 755 /usr/local/bin/entrypoint.sh /usr/local/bin/fetch-repo /usr/local/bin/git-askpass
+RUN chmod 755 /usr/local/bin/entrypoint.sh /usr/local/bin/fetch-repo \
+      /usr/local/bin/git-askpass /usr/local/bin/opencode-config
 
 EXPOSE 4096 8443
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
