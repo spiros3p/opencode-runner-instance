@@ -266,13 +266,16 @@ All commands run on the runner host, never from the calling harness.
   from an older image is removed (original kept as `opencode.json.v2.bak`), an
   unparseable file is kept as `opencode.json.invalid`, and every other key you
   added is preserved.
-- To change the model, set `OPENCODE_MODEL=provider/id` in `.env` and recreate
-  the container. The env value always wins over the `model` key stored in
-  `opencode.json` (the helper logs the override and backs the file up).
-  A bare id without a `provider/` prefix warns at boot and rarely resolves.
+- Model selection: leave `OPENCODE_MODEL` empty (recommended). The delegating
+  agent then sets the model per session and the runner keeps no default;
+  boot logs a reminder. Set `OPENCODE_MODEL=provider/id` in `.env` and
+  recreate only to pin a runner-wide default: the env value always wins
+  over the `model` key stored in `opencode.json` (the helper logs the
+  override and backs the file up). A bare id without a `provider/` prefix
+  warns at boot and rarely resolves.
 - Permission crashes: entrypoint re-chowns home every boot. Live repair:
   `docker exec opencode-runner bash -c 'chown -R agent:agent /home/agent && chmod -R u+rwX,go-rwx /home/agent'`.
-- Tests: `scripts/test-fetch-repo.sh`, `scripts/test-opencode-config.sh`, and
+- Tests: `scripts/test-fetch-repo.sh`, `scripts/test-opencode-config.sh`,
   `scripts/test-opencode-gateway.sh`, and `scripts/test-model-key-check.sh`
   run locally with no network and no container.
 - Migrating `GITHUB_TOKEN` -> `FETCH_GITHUB_TOKEN`: rename the var in `.env`

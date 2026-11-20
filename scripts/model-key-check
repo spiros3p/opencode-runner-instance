@@ -6,7 +6,10 @@
 # README.md ("Provider credentials"); update both together.
 set -uo pipefail
 MODEL_WANT="${1:-}"
-[ -n "$MODEL_WANT" ] || exit 0
+if [ -z "$MODEL_WANT" ]; then
+  echo "WARN: OPENCODE_MODEL is unset; runner has no default model (callers must set provider/id per session)"
+  exit 0
+fi
 case "$MODEL_WANT" in
   */*) MODEL_PROV="${MODEL_WANT%%/*}" ;;
   *) echo "WARN: OPENCODE_MODEL has no provider prefix; use provider/id"; exit 0 ;;
