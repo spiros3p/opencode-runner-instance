@@ -9,7 +9,7 @@ ENV LANG=C.UTF-8 TZ=Europe/Athens \
 
 RUN apt-get update \
      && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-     ca-certificates curl git python3 sudo supervisor util-linux \
+     ca-certificates curl git openssh-client python3 sudo supervisor util-linux \
      && rm -rf /var/lib/apt/lists/*
 
 RUN userdel -r node 2>/dev/null; groupdel node 2>/dev/null; \
