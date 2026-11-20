@@ -48,8 +48,10 @@ docker exec -u agent opencode-runner fetch-repo owner/repo main
 ```
 
 From a harness task, tell the agent to run `fetch-repo <owner/repo>` first and
-work in the directory it prints. Same repo name from a different URL gets a
-numeric suffix; nothing is nested under owner or platform directories.
+work in the directory it prints. An existing checkout is reused when its
+origin is the same repo, however it was cloned (https, ssh, or token URL).
+Only a genuinely different repo under the same name gets a numeric suffix;
+nothing is nested under owner or platform directories.
 
 ## Harness calls
 

@@ -22,6 +22,7 @@ case "$1" in
     case "$3 $4 $5" in
       "remote get-url origin") cat "$DIR/.git/origin" ;;
       "rev-parse --abbrev-ref HEAD") printf 'main\n' ;;
+      "rev-parse --git-dir"*) [ -e "$DIR/.git" ] && printf '%s/.git\n' "$DIR" || exit 1 ;;
       *) exit 1 ;;
     esac
     ;;
@@ -42,8 +43,36 @@ check "$B" "$A"
 check "$(wc -l < "$T/count" | tr -d ' ')" "1"
 
 C="$(run https://github.com/other/repo)"
-check "$C" "$T/ws/repo-$(printf '%s' 'https://github.com/other/repo' | cksum | cut -d' ' -f1)"
+check "$C" "$T/ws/repo-$(printf '%s' 'github.com/other/repo' | cksum | cut -d' ' -f1)"
 check "$(wc -l < "$T/count" | tr -d ' ')" "2"
+
+# SSH-cloned checkout is reused, never re-cloned under a numeric suffix
+mkdir -p "$T/ws/freb-app/.git"
+printf '%s' 'git@github.com:owner/freb-app.git' > "$T/ws/freb-app/.git/origin"
+CLONES_BEFORE="$(wc -l < "$T/count" | tr -d ' ')"
+D="$(run owner/freb-app)"
+check "$D" "$T/ws/freb-app"
+[ "$(wc -l < "$T/count" | tr -d ' ')" = "$CLONES_BEFORE" ] || { echo "FAIL: ssh-origin repo was re-cloned" >&2; exit 1; }
+
+# token-in-URL and http origins resolve to the same repo
+mkdir -p "$T/ws/tok-app/.git"
+printf '%s' 'https://x-access-token:sekret@github.com/owner/tok-app.git' > "$T/ws/tok-app/.git/origin"
+check "$(run owner/tok-app)" "$T/ws/tok-app"
+mkdir -p "$T/ws/http-app/.git"
+printf '%s' 'http://github.com/owner/http-app' > "$T/ws/http-app/.git/origin"
+check "$(run owner/http-app)" "$T/ws/http-app"
+check "$(wc -l < "$T/count" | tr -d ' ')" "$CLONES_BEFORE"
+
+# linked worktree (.git is a file, origin unreadable) counts as a repo
+mkdir -p "$T/ws/wt-app"
+printf '%s' 'gitdir: /elsewhere/wt-app.git' > "$T/ws/wt-app/.git"
+check "$(run owner/wt-app)" "$T/ws/wt-app"
+
+# genuinely different repo under the same name still takes the suffix
+mkdir -p "$T/ws/clash/.git"
+printf '%s' 'https://github.com/other/clash.git' > "$T/ws/clash/.git/origin"
+check "$(run owner/clash)" "$T/ws/clash-$(printf '%s' 'github.com/owner/clash' | cksum | cut -d' ' -f1)"
+check "$(wc -l < "$T/count" | tr -d ' ')" "3"
 
 if run git@github.com:owner/repo.git >/dev/null 2>&1; then echo "FAIL: SSH accepted" >&2; exit 1; fi
 if run http://github.com/owner/repo >/dev/null 2>&1; then echo "FAIL: http accepted" >&2; exit 1; fi

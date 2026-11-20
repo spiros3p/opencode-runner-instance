@@ -30,13 +30,29 @@ case "$URL" in
 esac
 
 canonical() {
-  local u="$1" scheme rest host path
+  # Normalize any git URL form to host/path so an existing checkout is
+  # recognised whatever it was cloned with: https, http, ssh://, scp-like
+  # SSH (git@host:path), git://, upper-case hosts, tokens or ports in the
+  # URL, trailing slashes and .git suffixes. Scheme is dropped on purpose:
+  # an old http:// origin is still the same repo as the https:// request.
+  local u="$1" tmp rest host path
+  case "$u" in
+    *://*) ;;
+    *@*:*)
+      case "${u%%:*}" in
+        *[/\]*) ;; # local path with a colon, not scp-like; leave alone
+        *) tmp="${u#*@}"; u="https://${tmp%%:*}/${tmp#*:}" ;;
+      esac
+      ;;
+  esac
   u="${u%/}"; u="${u%.git}"
-  rest="${u#*://}"; scheme="${u%%://*}"
+  rest="${u#*://}"
   host="${rest%%/*}"; path="${rest#*/}"
+  host="${host##*@}" # strip userinfo (user or user:pass token)
+  host="${host%%:*}" # strip port
   host="$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')"
   host="${host#www.}"
-  printf '%s://%s/%s\n' "$scheme" "$host" "$path"
+  printf '%s/%s\n' "$host" "$path"
 }
 CANON="$(canonical "$URL")"
 REST="${URL#*://}"
@@ -61,13 +77,19 @@ if command -v flock >/dev/null 2>&1; then
 fi
 
 # Flat layout: pick the canonical dir, or a numeric suffix on name collision.
+# An existing checkout is reused when its origin resolves to the same repo,
+# whatever URL form it was cloned with. Only a genuinely different repo under
+# the same name takes the suffix dir; anything else unresolvable dies loudly
+# instead of silently cloning a duplicate.
 DIR=""
 for CAND in "$WORKSPACE/$NAME" "$WORKSPACE/$NAME-$SUM"; do
   if [ ! -e "$CAND" ]; then
     DIR="$CAND"
     break
   fi
-  if [ ! -d "$CAND/.git" ]; then
+  # rev-parse (not a .git dir test) so linked worktrees, whose .git is a
+  # file, are recognised as repos and reused too.
+  if ! git -C "$CAND" rev-parse --git-dir >/dev/null 2>&1; then
     [ "$CAND" = "$WORKSPACE/$NAME" ] && continue
     die "target exists but is not a git repo: $CAND"
   fi
@@ -79,7 +101,7 @@ for CAND in "$WORKSPACE/$NAME" "$WORKSPACE/$NAME-$SUM"; do
 done
 [ -n "$DIR" ] || die "unresolved name collision for $NAME"
 
-if [ -d "$DIR/.git" ]; then
+if git -C "$DIR" rev-parse --git-dir >/dev/null 2>&1; then
   if [ -n "$REF" ]; then
     ACTUAL="$(git -C "$DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
     [ "$ACTUAL" = "$REF" ] || log "WARN: $DIR is on '$ACTUAL', not requested '$REF'"
