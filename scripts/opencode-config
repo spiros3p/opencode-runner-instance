@@ -113,9 +113,9 @@ def merge_permission(cfg):
         if current is None:
             perm[key] = json.loads(json.dumps(value))
         elif isinstance(current, dict) and isinstance(value, dict):
-            merged = {k: v for k, v in value.items() if k not in current}
-            merged.update(current)
-            perm[key] = merged
+            # Defaults first (canonical order), operator values on top, and
+            # operator-only patterns last. opencode takes the LAST match.
+            perm[key] = {**value, **current}
 
 
 def fresh_config(model):
@@ -186,9 +186,9 @@ def main():
         backup(path, ".v2.bak")
     changed = had_v2
 
-    before = json.dumps(cfg.get("permission"), sort_keys=True)
+    before = json.dumps(cfg.get("permission"))
     merge_permission(cfg)
-    if json.dumps(cfg.get("permission"), sort_keys=True) != before:
+    if json.dumps(cfg.get("permission")) != before:
         changed = True
 
     if model:

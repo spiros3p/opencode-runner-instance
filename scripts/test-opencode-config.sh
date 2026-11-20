@@ -121,4 +121,16 @@ BEFORE="$(cat "$T/h/opencode.json")"
 run "$T/h/opencode.json" >/dev/null
 assert "good config untouched" "$(cat "$T/h/opencode.json")" "$BEFORE"
 
+# 9. wrong rule order on disk is repaired (defaults must come first)
+mkdir -p "$T/i"
+cat > "$T/i/opencode.json" <<'EOF'
+{
+  "permission": { "read": { "*.env": "deny", "*": "allow" } }
+}
+EOF
+assert "wrong order was unsafe" "$(eff "$T/i/opencode.json" ".env")" "allow"
+run "$T/i/opencode.json" >/dev/null
+assert "wrong order repaired" "$(eff "$T/i/opencode.json" ".env")" "deny"
+assert "normal read still allowed" "$(eff "$T/i/opencode.json" "main.py")" "allow"
+
 echo "opencode-config tests passed"

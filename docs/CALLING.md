@@ -83,10 +83,14 @@ Keys cannot be passed per call.
 
 ## 4. JavaScript client
 
-```ts
-import { OpenCode } from "@opencode/client"
+The V1 client shipped with opencode 1.19.6 (`createOpencodeClient`) talks to the
+`/session` routes. Its `session.prompt` is synchronous, so there is no wait
+call:
 
-const client = OpenCode.make({
+```ts
+import { createOpencodeClient } from "@opencode/client"
+
+const client = createOpencodeClient({
   baseUrl: "http://RUNNER:4096",
   headers: {
     authorization: `Basic ${Buffer.from(`opencode:${process.env.OPENCODE_PASSWORD}`).toString("base64")}`,
@@ -94,16 +98,20 @@ const client = OpenCode.make({
 })
 
 const session = await client.session.create({
-  location: { directory: "/workspace/repo" },
-  title: "task",
+  query: { directory: "/workspace/repo" },
+  body: { title: "task" },
 })
 
-await client.session.prompt({ sessionID: session.id, text: "Fix the failing login test." })
-await client.session.wait({ sessionID: session.id })
+await client.session.prompt({
+  path: { id: session.data.id },
+  body: { parts: [{ type: "text", text: "Fix the failing login test." }] },
+})
+
+const messages = await client.session.messages({ path: { id: session.data.id } })
 ```
 
-For message reads, use `GET /api/session/{id}/message` (or the matching method
-in the generated client — names mirror `/openapi.json` operation IDs).
+For the `/api` routes used above, use the generated client that matches your
+opencode version; method names mirror the `/doc` operation IDs.
 
 ## 5. Configure providers after boot
 
