@@ -1,6 +1,5 @@
 .env
-secrets/*
-!secrets/.gitkeep
+secrets/
 workspace/*
 !workspace/.gitkeep
 __pycache__/

@@ -1,0 +1,12 @@
+#!/bin/sh
+# Supplies the GitHub PAT only to github.com prompts. Never puts it in argv
+# or .git/config: git reads it from env through GIT_ASKPASS.
+case "$1" in
+  *github.com*) ;;
+  *) exit 1 ;;
+esac
+case "$1" in
+  *[Uu]sername*) printf '%s\n' 'x-access-token' ;;
+  *[Pp]assword*) printf '%s\n' "${GITHUB_TOKEN:-}" ;;
+  *) exit 1 ;;
+esac

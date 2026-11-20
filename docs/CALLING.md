@@ -1,21 +1,22 @@
 # Calling the runner from a harness
 
-Two services, two auths. Commissioning uses the bearer token; agent work uses
-the native opencode server.
+One service, one auth. Agent work uses the native opencode server. Repos are
+fetched on the runner by the `fetch-repo` helper, not over HTTP.
 
-## 1. Commission (once per repo)
+## 1. Fetch a repo (once per repo)
+
+From the runner host:
 
 ```bash
-curl -fsS -X POST http://RUNNER:8300/repos \
-  -H "Authorization: Bearer $RUNNER_API_TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"url":"git@github.com:owner/repo.git","ref":"main"}'
+docker exec -u agent opencode-runner fetch-repo owner/repo main
+# -> /workspace/repo
 ```
 
-Response: `{"id":"...","url":"...","name":"repo","directory":"/workspace/repo","created":true}`.
-
-Repeating with the same URL returns `created:false` and the same directory.
-Never re-clones. `GET /repos` lists all.
+From a harness, tell the runner agent in the first prompt to run
+`fetch-repo <owner/repo> [ref]` and work in the directory it prints. The
+helper clones once, returns the same path on repeat calls, and keeps all repos
+flat under `/workspace`. github.com HTTPS clones use `GITHUB_TOKEN` from the
+runner's env; the caller does not send a token.
 
 ## 2. Run a task (native opencode API)
 

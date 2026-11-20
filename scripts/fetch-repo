@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# Clone a repo once into the flat /workspace layout. Uses GITHUB_TOKEN for
+# github.com HTTPS clones via askpass, so the PAT never enters argv or
+# .git/config. Prints the absolute directory on stdout; logs go to stderr.
+set -euo pipefail
+WORKSPACE="${WORKSPACE:-/workspace}"
+log() { printf '[fetch-repo] %s\n' "$*" >&2; }
+die() { log "$*"; exit 2; }
+
+[ "$(id -u)" -ne 0 ] || die "run as agent: docker exec -u agent opencode-runner fetch-repo ..."
+[ $# -ge 1 ] || die "usage: fetch-repo <owner/repo|https-url> [ref]"
+SPEC="$1"
+REF="${2:-}"
+
+case "$SPEC" in
+  git@*|ssh://*) die "SSH URLs need a deploy key; this runner is PAT-only" ;;
+  http://*) die "http is not allowed; use https" ;;
+  https://*|*/*) ;;
+  *) die "expected owner/repo or https URL" ;;
+esac
+
+case "$SPEC" in
+  https://*) URL="$SPEC" ;;
+  *) URL="https://github.com/${SPEC%.git}.git" ;;
+esac
+URL="${URL%/}"
+case "$URL" in
+  *.git) ;;
+  *) URL="$URL.git" ;;
+esac
+
+canonical() {
+  local u="$1" scheme rest host path
+  u="${u%/}"; u="${u%.git}"
+  rest="${u#*://}"; scheme="${u%%://*}"
+  host="${rest%%/*}"; path="${rest#*/}"
+  host="$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')"
+  host="${host#www.}"
+  printf '%s://%s/%s\n' "$scheme" "$host" "$path"
+}
+CANON="$(canonical "$URL")"
+REST="${URL#*://}"
+HOST="${REST%%/*}"
+case "$HOST" in
+  *@*) die "URL must not contain credentials" ;;
+  github.com|www.github.com) USE_PAT=1 ;;
+  *) USE_PAT=0 ;;
+esac
+
+BASE="${URL##*/}"
+BASE="${BASE%.git}"
+NAME="$(printf '%s' "$BASE" | sed 's/[^A-Za-z0-9._-]/-/g; s/^[-._]*//; s/[-._]*$//')"
+[ -n "$NAME" ] || NAME=repo
+SUM="$(printf '%s' "$CANON" | cksum | cut -d' ' -f1)"
+
+mkdir -p "$WORKSPACE"
+LOCK="/tmp/fetch-repo-$NAME.lock"
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"$LOCK"
+  flock 9
+fi
+
+# Flat layout: pick the canonical dir, or a numeric suffix on name collision.
+DIR=""
+for CAND in "$WORKSPACE/$NAME" "$WORKSPACE/$NAME-$SUM"; do
+  if [ ! -e "$CAND" ]; then
+    DIR="$CAND"
+    break
+  fi
+  if [ ! -d "$CAND/.git" ]; then
+    [ "$CAND" = "$WORKSPACE/$NAME" ] && continue
+    die "target exists but is not a git repo: $CAND"
+  fi
+  ORIGIN="$(git -C "$CAND" remote get-url origin 2>/dev/null || true)"
+  if [ -z "$ORIGIN" ] || [ "$(canonical "$ORIGIN")" = "$CANON" ]; then
+    DIR="$CAND"
+    break
+  fi
+done
+[ -n "$DIR" ] || die "unresolved name collision for $NAME"
+
+if [ -d "$DIR/.git" ]; then
+  if [ -n "$REF" ]; then
+    ACTUAL="$(git -C "$DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+    [ "$ACTUAL" = "$REF" ] || log "WARN: $DIR is on '$ACTUAL', not requested '$REF'"
+  fi
+  printf '%s\n' "$DIR"
+  exit 0
+fi
+
+if [ "$USE_PAT" = 1 ]; then
+  export GIT_TERMINAL_PROMPT=0
+  if [ -n "${GITHUB_TOKEN:-}" ]; then
+    export GIT_ASKPASS=/usr/local/bin/git-askpass
+  else
+    log "GITHUB_TOKEN unset; public github.com repos only"
+  fi
+else
+  export GIT_TERMINAL_PROMPT=0
+fi
+
+CLONE=(git clone)
+if command -v timeout >/dev/null 2>&1; then
+  CLONE=(timeout 900 git clone)
+fi
+[ -n "$REF" ] && CLONE+=(--branch "$REF" --single-branch)
+TMP="$(mktemp -d "$WORKSPACE/.fetch-$NAME.XXXXXX")"
+trap 'rm -rf "$TMP"' EXIT
+CLONE+=(-- "$URL" "$TMP")
+log "clone $URL -> $DIR"
+"${CLONE[@]}" >&2
+mv "$TMP" "$DIR"
+trap - EXIT
+printf '%s\n' "$DIR"

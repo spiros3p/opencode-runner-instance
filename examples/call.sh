@@ -1,23 +1,15 @@
 #!/usr/bin/env bash
-# One-shot example: commission a repo, run a task, print the last messages.
-# Usage: RUNNER=http://127.0.0.1:8300 OC=http://127.0.0.1:4096 \
-#        RUNNER_API_TOKEN=... OPENCODE_PASSWORD=... \
-#        ./examples/call.sh <git-url> <task-prompt-file>
+# One-shot example: run a task in an already-fetched repo, print last messages.
+# Fetch with `docker exec -u agent opencode-runner fetch-repo owner/repo` first, or tell
+# the runner agent to do it in the task prompt.
+# Usage: OC=http://127.0.0.1:4096 OPENCODE_PASSWORD=... \
+#        ./examples/call.sh /workspace/repo <task-prompt-file>
 set -euo pipefail
 
-RUNNER="${RUNNER:-http://127.0.0.1:8300}"
 OC="${OC:-http://127.0.0.1:4096}"
-: "${RUNNER_API_TOKEN:?set RUNNER_API_TOKEN}"
 : "${OPENCODE_PASSWORD:?set OPENCODE_PASSWORD}"
-URL="${1:?usage: call.sh <git-url> <task-prompt-file>}"
-TASK="${2:?usage: call.sh <git-url> <task-prompt-file>}"
-
-REPO=$(curl -fsS -X POST "$RUNNER/repos" \
-  -H "Authorization: Bearer $RUNNER_API_TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d "$(jq -nc --arg url "$URL" '{url:$url}')")
-DIR=$(printf '%s' "$REPO" | jq -r .directory)
-echo "workspace: $DIR"
+DIR="${1:?usage: call.sh <runner-directory> <task-prompt-file>}"
+TASK="${2:?usage: call.sh <runner-directory> <task-prompt-file>}"
 
 SESSION=$(curl -fsS -X POST "$OC/api/session" \
   -u "opencode:$OPENCODE_PASSWORD" -H 'Content-Type: application/json' \

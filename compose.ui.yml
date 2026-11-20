@@ -1,0 +1,7 @@
+# Optional UI port. Add this override only when ENABLE_CODE_SERVER=true.
+# Keeping it out of compose.yml means a busy host port 8222 cannot block the
+# headless runner from starting.
+services:
+  runner:
+    ports:
+      - "${BIND_IP:-0.0.0.0}:${CODE_SERVER_PORT:-8222}:8443"
