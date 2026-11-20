@@ -38,7 +38,7 @@ canonical() {
   local u="$1" tmp rest host path
   case "$u" in
     *://*) ;;
-    *@*:*)
+    *:*)
       case "${u%%:*}" in
         *[/\]*) ;; # local path with a colon, not scp-like; leave alone
         *) tmp="${u#*@}"; u="https://${tmp%%:*}/${tmp#*:}" ;;
@@ -49,7 +49,10 @@ canonical() {
   rest="${u#*://}"
   host="${rest%%/*}"; path="${rest#*/}"
   host="${host##*@}" # strip userinfo (user or user:pass token)
-  host="${host%%:*}" # strip port
+  case "$host" in
+    [[]*[]]*) host="${host%%]*}" ;; # bracketed IPv6: drop :port, keep [addr]
+    *) host="${host%%:*}" ;; # strip port
+  esac
   host="$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')"
   host="${host#www.}"
   printf '%s/%s\n' "$host" "$path"
@@ -68,6 +71,10 @@ BASE="${BASE%.git}"
 NAME="$(printf '%s' "$BASE" | sed 's/[^A-Za-z0-9._-]/-/g; s/^[-._]*//; s/[-._]*$//')"
 [ -n "$NAME" ] || NAME=repo
 SUM="$(printf '%s' "$CANON" | cksum | cut -d' ' -f1)"
+# Pre-upgrade releases checksummed "https://host/path" (scheme included).
+# Keep looking at the old number so a clash folder from that era is reused
+# instead of cloned a second time.
+SUM_OLD="$(printf '%s' "https://$CANON" | cksum | cut -d' ' -f1)"
 
 mkdir -p "$WORKSPACE"
 LOCK="/tmp/fetch-repo-$NAME.lock"
@@ -76,29 +83,41 @@ if command -v flock >/dev/null 2>&1; then
   flock 9
 fi
 
-# Flat layout: pick the canonical dir, or a numeric suffix on name collision.
-# An existing checkout is reused when its origin resolves to the same repo,
-# whatever URL form it was cloned with. Only a genuinely different repo under
-# the same name takes the suffix dir; anything else unresolvable dies loudly
-# instead of silently cloning a duplicate.
+# Flat layout: reuse first, clone second. Pass 1 reuses any existing checkout
+# (canonical dir or either suffix generation) whose origin resolves to the
+# same repo, whatever URL form it was cloned with. Pass 2 clones into the
+# first free slot. Only a genuinely different repo under the same name takes
+# the suffix dir; anything else unresolvable dies loudly instead of silently
+# cloning a duplicate.
 DIR=""
-for CAND in "$WORKSPACE/$NAME" "$WORKSPACE/$NAME-$SUM"; do
-  if [ ! -e "$CAND" ]; then
-    DIR="$CAND"
-    break
-  fi
+for CAND in "$WORKSPACE/$NAME" "$WORKSPACE/$NAME-$SUM" "$WORKSPACE/$NAME-$SUM_OLD"; do
+  [ -e "$CAND" ] || continue
   # rev-parse (not a .git dir test) so linked worktrees, whose .git is a
   # file, are recognised as repos and reused too.
-  if ! git -C "$CAND" rev-parse --git-dir >/dev/null 2>&1; then
-    [ "$CAND" = "$WORKSPACE/$NAME" ] && continue
-    die "target exists but is not a git repo: $CAND"
-  fi
+  git -C "$CAND" rev-parse --git-dir >/dev/null 2>&1 || continue
   ORIGIN="$(git -C "$CAND" remote get-url origin 2>/dev/null || true)"
-  if [ -z "$ORIGIN" ] || [ "$(canonical "$ORIGIN")" = "$CANON" ]; then
+  if [ "$CAND" = "$WORKSPACE/$NAME" ]; then
+    if [ -z "$ORIGIN" ] || [ "$(canonical "$ORIGIN")" = "$CANON" ]; then
+      DIR="$CAND"
+      break
+    fi
+  elif [ -n "$ORIGIN" ] && [ "$(canonical "$ORIGIN")" = "$CANON" ]; then
     DIR="$CAND"
     break
   fi
 done
+if [ -z "$DIR" ]; then
+  for CAND in "$WORKSPACE/$NAME" "$WORKSPACE/$NAME-$SUM"; do
+    if [ ! -e "$CAND" ]; then
+      DIR="$CAND"
+      break
+    fi
+    if ! git -C "$CAND" rev-parse --git-dir >/dev/null 2>&1; then
+      [ "$CAND" = "$WORKSPACE/$NAME" ] && continue
+      die "target exists but is not a git repo: $CAND"
+    fi
+  done
+fi
 [ -n "$DIR" ] || die "unresolved name collision for $NAME"
 
 if git -C "$DIR" rev-parse --git-dir >/dev/null 2>&1; then

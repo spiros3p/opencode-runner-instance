@@ -63,15 +63,36 @@ printf '%s' 'http://github.com/owner/http-app' > "$T/ws/http-app/.git/origin"
 check "$(run owner/http-app)" "$T/ws/http-app"
 check "$(wc -l < "$T/count" | tr -d ' ')" "$CLONES_BEFORE"
 
-# linked worktree (.git is a file, origin unreadable) counts as a repo
-mkdir -p "$T/ws/wt-app"
-printf '%s' 'gitdir: /elsewhere/wt-app.git' > "$T/ws/wt-app/.git"
+# linked worktree (.git is a file, origin unreadable) counts as a repo.
+# The stub pins rev-parse instead of validating the gitdir target like real
+# git would, so the fixture target is created for consistency.
+mkdir -p "$T/elsewhere/wt-app.git" "$T/ws/wt-app"
+printf '%s' "gitdir: $T/elsewhere/wt-app.git" > "$T/ws/wt-app/.git"
 check "$(run owner/wt-app)" "$T/ws/wt-app"
 
 # genuinely different repo under the same name still takes the suffix
 mkdir -p "$T/ws/clash/.git"
 printf '%s' 'https://github.com/other/clash.git' > "$T/ws/clash/.git/origin"
 check "$(run owner/clash)" "$T/ws/clash-$(printf '%s' 'github.com/owner/clash' | cksum | cut -d' ' -f1)"
+check "$(wc -l < "$T/count" | tr -d ' ')" "3"
+
+# pre-upgrade numeric-suffix dir (old https:// checksum) is reused, not cloned
+OLD_SUM="$(printf '%s' 'https://github.com/owner/legacy' | cksum | cut -d' ' -f1)"
+mkdir -p "$T/ws/legacy-$OLD_SUM/.git"
+printf '%s' 'https://github.com/owner/legacy.git' > "$T/ws/legacy-$OLD_SUM/.git/origin"
+check "$(run owner/legacy)" "$T/ws/legacy-$OLD_SUM"
+check "$(wc -l < "$T/count" | tr -d ' ')" "3"
+
+# scp-like SSH without a user still resolves to the same repo
+mkdir -p "$T/ws/nouser/.git"
+printf '%s' 'git.example.com:owner/nouser.git' > "$T/ws/nouser/.git/origin"
+check "$(run https://git.example.com/owner/nouser)" "$T/ws/nouser"
+check "$(wc -l < "$T/count" | tr -d ' ')" "3"
+
+# bracketed IPv6 origin resolves to the same repo
+mkdir -p "$T/ws/v6/.git"
+printf '%s' 'ssh://git@[2001:db8::1]/owner/v6.git' > "$T/ws/v6/.git/origin"
+check "$(run 'https://[2001:db8::1]/owner/v6')" "$T/ws/v6"
 check "$(wc -l < "$T/count" | tr -d ' ')" "3"
 
 if run git@github.com:owner/repo.git >/dev/null 2>&1; then echo "FAIL: SSH accepted" >&2; exit 1; fi
