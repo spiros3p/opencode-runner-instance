@@ -27,6 +27,13 @@ if [ -n "${GITHUB_TOKEN:-}" ]; then
   exit 1
 fi
 unset GITHUB_TOKEN
+# gh reads GH_TOKEN. models.dev maps only GITHUB_TOKEN (to github-copilot), so
+# exposing the fetch PAT under GH_TOKEN lets gh authenticate without reviving
+# the name that breaks copilot. compose.yml also sets GH_TOKEN in the container
+# config, because `docker exec` inherits that, not the exports made here.
+if [ -n "${FETCH_GITHUB_TOKEN:-}" ]; then
+  export GH_TOKEN="${GH_TOKEN:-$FETCH_GITHUB_TOKEN}"
+fi
 log "fetch pat: $([ -n "${FETCH_GITHUB_TOKEN:-}" ] && echo set || echo unset) (FETCH_GITHUB_TOKEN: fetch-repo clones only, hidden from the model server)"
 
 # Default-model provider check. The runner answers only when the default

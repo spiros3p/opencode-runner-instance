@@ -8,6 +8,10 @@ services:
     cpus: 8
     mem_limit: 6g
     env_file: .env
+    environment:
+      # gh reads GH_TOKEN. Set it in the container config, not only at runtime:
+      # `docker exec` inherits Config.Env, not the entrypoint's exports.
+      GH_TOKEN: ${FETCH_GITHUB_TOKEN:-}
     cap_drop: [ NET_ADMIN, NET_RAW, SYS_PTRACE ]
     ports:
       - "${BIND_IP:-0.0.0.0}:${OPENCODE_PORT:-4096}:4096"

@@ -5,7 +5,8 @@
 FROM node:26-bookworm-slim
 
 ENV LANG=C.UTF-8 TZ=Europe/Athens \
-     ENABLE_CODE_SERVER=false
+     ENABLE_CODE_SERVER=false \
+     GH_NO_UPDATE_NOTIFIER=1
 
 RUN apt-get update \
      && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -41,6 +42,27 @@ RUN CS_ARCH="$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')" \
      && tar -xzf /tmp/cs.tgz -C /usr/local/lib/code-server --strip-components=1 \
      && ln -sfn /usr/local/lib/code-server/bin/code-server /usr/local/bin/code-server \
      && rm -f /tmp/cs.tgz
+
+# GitHub CLI, for gh commands inside the container. Pinned version, digests
+# from the release checksums file for v2.105.0. gh reads GH_TOKEN, which the
+# entrypoint exports from FETCH_GITHUB_TOKEN.
+ARG GH_VERSION=2.105.0
+ARG GH_SHA_AMD64=79e7ab5db738c48777b696e374f8b428f0647debfb424f44d2f426370407fe2f
+ARG GH_SHA_ARM64=b1278c75107423d818f1937fd92cafc9e5e9b606631568f68d7fb816f5885a02
+RUN GH_ARCH="$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')" \
+     && case "$GH_ARCH" in \
+          amd64) GH_SHA="$GH_SHA_AMD64" ;; \
+          arm64) GH_SHA="$GH_SHA_ARM64" ;; \
+          *) echo "unsupported arch: $GH_ARCH" >&2; exit 1 ;; \
+        esac \
+     && curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${GH_ARCH}.tar.gz" \
+     -o /tmp/gh.tgz \
+     && echo "$GH_SHA  /tmp/gh.tgz" | sha256sum -c - \
+     && mkdir -p /usr/local/lib/gh \
+     && tar -xzf /tmp/gh.tgz -C /usr/local/lib/gh --strip-components=1 \
+     && ln -sfn /usr/local/lib/gh/bin/gh /usr/local/bin/gh \
+     && gh --version \
+     && rm -f /tmp/gh.tgz
 
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY scripts/fetch-repo /usr/local/bin/fetch-repo

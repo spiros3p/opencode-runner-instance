@@ -160,4 +160,11 @@ run "$T/l/opencode.json" >/dev/null 2>/tmp/l-err.txt
 ! grep -q "\"apiKey\"" "$T/l/opencode.json" || fail "mapping not stripped"
 grep -q "fetch-PAT" /tmp/l-err.txt || fail "sanitizer note missing"
 
+# 13. GH_TOKEN (the name gh reads) is stripped from provider keys too
+mkdir -p "$T/m"
+echo "{\"model\": \"acme/model\", \"provider\": {\"github-copilot\": {\"options\": {\"apiKey\": \"{env:GH_TOKEN}\"}}}}" > "$T/m/opencode.json"
+run "$T/m/opencode.json" >/dev/null 2>/tmp/m-err.txt
+! grep -q "\"apiKey\"" "$T/m/opencode.json" || fail "GH_TOKEN mapping not stripped"
+grep -q "fetch-PAT" /tmp/m-err.txt || fail "sanitizer note missing"
+
 echo "opencode-config tests passed"

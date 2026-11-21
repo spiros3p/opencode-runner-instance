@@ -54,6 +54,19 @@ origin is the same repo, however it was cloned (https, ssh, or token URL).
 Only a genuinely different repo under the same name gets a numeric suffix;
 nothing is nested under owner or platform directories.
 
+## GitHub CLI
+
+`gh` is in the image (pinned, digest-verified). It authenticates with the same
+PAT as `fetch-repo`: `compose.yml` puts that PAT in the container environment
+as `GH_TOKEN`, the name the CLI reads, so it works both for the agent's own
+shell and for `docker exec`. `GITHUB_TOKEN` stays unset on purpose, because
+models.dev maps that name to the github-copilot provider and a PAT there breaks
+copilot turns.
+
+```bash
+docker exec -u agent opencode-runner gh api repos/spiros3p/opencode-runner-instance
+```
+
 ## VS Code over Tailscale
 
 `compose.ui.yml` adds a one-shot helper container that maps the VS Code

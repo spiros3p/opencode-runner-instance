@@ -109,7 +109,9 @@ def sanitize_pat_providers(cfg):
         if not isinstance(opts, dict):
             continue
         key = opts.get("apiKey")
-        if isinstance(key, str) and ("GITHUB_TOKEN" in key or "FETCH_GITHUB_TOKEN" in key):
+        if isinstance(key, str) and (
+            "GITHUB_TOKEN" in key or "FETCH_GITHUB_TOKEN" in key or "GH_TOKEN" in key
+        ):
             del opts["apiKey"]
             fixed.append(pid)
     return fixed
