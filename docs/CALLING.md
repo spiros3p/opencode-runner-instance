@@ -33,7 +33,7 @@ SESSION=$(curl -fsS -X POST "$BASE/api/session" -u "$AUTH" \
 
 curl -fsS -X POST "$BASE/api/session/$SESSION/prompt" -u "$AUTH" \
   -H 'Content-Type: application/json' \
-  -d "$(jq -nc --rawfile text "$TASK" '{prompt:{text:$text}}')" >/dev/null
+  -d "$(jq -nc --rawfile text "$TASK" '{text:$text}')" >/dev/null
 
 curl -fsS -X POST "$BASE/api/session/$SESSION/wait" -u "$AUTH" >/dev/null
 
@@ -43,32 +43,35 @@ curl -fsS "$BASE/api/session/$SESSION/message?order=desc&limit=10" -u "$AUTH" | 
 Useful endpoints:
 - `POST /api/session` — create session at a location (`location.directory`).
   Response is `{"data":{"id":"ses_..."}}`.
-- `POST /api/session/{id}/prompt` — admit one user message. Body is
-  `{"prompt":{"text":"..."}}`.
+- `POST /api/session/{id}/prompt` — admit one user message. V2 body is
+  `{"text":"..."}` (extra keys are rejected).
 - `POST /api/session/{id}/interrupt` — stop an active run.
 - `POST /api/session/{id}/model` — switch model mid-session. Body
   `{"model":{"providerID":"...","id":"...","variant?":"..."}}` (`variant`
   optional, e.g. `"high"` for reasoning effort; omit the key when unused).
 - `POST /api/session/{id}/agent` — switch agent mid-session. Body
   `{"agent":"..."}` (e.g. `build` vs read-only `plan`).
-- `GET /api/session/{id}/permission`, `GET /api/session/{id}/question` —
-  list pending approval/question requests (`{"data":[...]}`). Answer with:
-  - permission: `POST .../permission/{requestID}/reply` body
-    `{"reply":"once"|"always"|"reject"}`
-  - question: `POST .../question/{requestID}/reply` body
-    `{"answers":[{"value":"..."}]}` (one entry per question, in order), or
-    `POST .../question/{requestID}/reject` with no body.
-  A headless caller polls these when a turn stalls instead of
-  auto-answering. Exact shapes: `GET /doc`.
+- `GET /api/session/{id}/permission` — list pending approval requests
+  (`{"data":[...]}`). Answer with `POST .../permission/{requestID}/reply`
+  body `{"decision":"once"|"always"|"reject"}`.
+- V2 has no `/question` API; questions arrive as forms. List with
+  `GET /api/session/{id}/form` and answer via
+  `POST /api/session/{id}/form/{formID}/reply` (body shape in `/openapi.json`).
+  A headless caller polls these when a turn stalls instead of auto-answering.
 - `POST /api/session/{id}/wait` — block until the turn settles (gateway polls
   messages, then 204). Answers 204 on timeout too: always confirm via
   `GET .../message` until a `COMPLETE` assistant reply (`time.completed` or
   `finish` set; ignore streaming partials). Never loops forever client-side:
   use one overall deadline for wait + poll.
 - `GET /api/session/{id}/message` — read turn history, `{"data":[...]}`.
-- `GET /vcs/diff?directory=<dir>&mode=git` — working tree diff.
+- `GET /api/vcs/diff?location%5Bdirectory%5D=<dir>&mode=working` — working tree
+  diff (`mode`: `working` | `branch` | `committed`). Encode the brackets as
+  `%5B`/`%5D` (or use `curl -g`), otherwise curl treats them as a glob and
+  exits before sending. V1's `/vcs/diff` and `/vcs/diff/raw` are gone; build a
+  patch from each file's `patch` field.
 - `GET /api/agent`, `GET /api/model` — discovery.
-- `GET /doc` — full API contract on the running server.
+- `GET /api/health` — gateway's own health check (V2 upstream has none).
+- `GET /openapi.json` — full V2 API contract on the running server.
 
 ## 3. Choosing a model
 
@@ -106,37 +109,13 @@ curl -fsS -X POST "$BASE/api/session/$SESSION/model" -u "$AUTH" \
   -d '{"model":{"providerID":"opencode-go","id":"deepseek-v4.1-flash","variant":"high"}}'
 ```
 
-## 4. JavaScript client
+## 4. Clients
 
-The V1 client shipped with opencode 1.19.6 (`createOpencodeClient`) talks to the
-`/session` routes. Its `session.prompt` is synchronous, so there is no wait
-call:
-
-```ts
-import { createOpencodeClient } from "@opencode/client"
-
-const client = createOpencodeClient({
-  baseUrl: "http://RUNNER:4096",
-  headers: {
-    authorization: `Basic ${Buffer.from(`opencode:${process.env.OPENCODE_PASSWORD}`).toString("base64")}`,
-  },
-})
-
-const session = await client.session.create({
-  query: { directory: "/workspace/repo" },
-  body: { title: "task" },
-})
-
-await client.session.prompt({
-  path: { id: session.data.id },
-  body: { parts: [{ type: "text", text: "Fix the failing login test." }] },
-})
-
-const messages = await client.session.messages({ path: { id: session.data.id } })
-```
-
-For the `/api` routes used above, use the generated client that matches your
-opencode version; method names mirror the `/doc` operation IDs.
+Do not use the V1 `@opencode/client` (`createOpencodeClient`): it sends the old
+`{"prompt":{"text":...}}` body and is rejected by V2. Generate a client from
+`GET /openapi.json` on the runner, or use the curl calls in section 2. The
+gateway's `/api/session/{id}/wait` is not in upstream OpenAPI — call it
+directly as shown.
 
 ## 5. Configure providers after boot
 
@@ -161,13 +140,15 @@ Never commit keys.
 
 ## Permissions
 
-The runner writes a V1 `permission` block into
+The runner writes a V2 `permissions` array into
 `/home/agent/.config/opencode/opencode.json` so a headless session never
 blocks on an approval:
 
+- `*` — allow by default
 - `read` — `*.env` and `*.env.*` denied, `*.env.example` allowed
-- `doom_loop` — denied, so a stuck loop errors instead of hanging
 - `external_directory` — allowed, this is a dedicated runner
+- V1 `permission` blocks are removed at boot (backup: `opencode.json.bak`);
+  `doom_loop` is not a V2 action
 
 Operator rules in that file win over these defaults. A repo's own
 `opencode.json` can add `ask` rules; a headless harness must then answer
@@ -176,7 +157,7 @@ through the permission API or the run stalls:
 ```bash
 curl -fsS -X POST "$BASE/api/session/$SESSION/permission/$REQUEST_ID/reply" \
   -u "$AUTH" -H 'Content-Type: application/json' \
-  -d '{"reply":"once"}'   # once | always | reject
+  -d '{"decision":"once"}'   # once | always | reject
 ```
 
 Keep runner and repo configs deny-based.
@@ -186,12 +167,10 @@ Keep runner and repo configs deny-based.
 Reviews stay local. To review remote work: `GET .../message` for the final
 assistant text, then the patch:
 
-- `GET /vcs/diff?directory=<dir>&mode=git` — JSON array of
-  `{file, patch, additions, deletions, status}`; the per-file `patch` field
-  holds that file diff.
-- `GET /vcs/diff/raw?directory=<dir>` — the whole diff as `text/x-diff`,
-  ready for `git apply` (no `mode` parameter). Use this one to apply:
-  `curl ... > patch.diff && git apply --check patch.diff`.
+- `GET /api/vcs/diff?location%5Bdirectory%5D=<dir>&mode=working` —
+  `{"location":...,"data":[...]}`; each entry's `patch` field holds that
+  file's diff. Concatenate the patches to build one `git apply`-ready file.
+  V1's `/vcs/diff/raw` no longer exists.
 
 Apply to a local worktree, then run the normal local review lane. The runner
 never merges.

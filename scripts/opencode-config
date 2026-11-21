@@ -1,48 +1,41 @@
 #!/usr/bin/env python3
-"""Seed or repair the opencode config for a headless runner.
+"""Seed or repair the V2 opencode config for a headless runner.
 
-opencode 1.x (V1) rejects the V2 `permissions` array and then refuses to
-start. This script keeps the config valid and headless-safe:
-
-  * writes a fresh config when none exists (model + V1 `permission` block)
-  * strips V2 `permissions` keys (top level or nested in agent blocks)
-  * adds the V1 `permission` defaults that stop approval prompts hanging a
-    headless session, without overriding rules the operator set
-  * keeps every other key, so provider/theme settings survive
+  * writes a fresh config when none exists (model + V2 `permissions` array)
+  * translates V1 `permission` blocks into V2 rules instead of dropping denies
+  * adds headless defaults only for rules the operator did not set, then keeps
+    every operator rule in its written order (V2 uses the LAST matching rule)
+  * keeps the *.env deny as a final floor unless the operator explicitly allows
+    that exact path
+  * keeps every other key, including provider/MCP/theme settings
   * never fails the boot: a broken config is backed up and replaced
 
 Prints one status line on stdout. Warnings go to stderr.
 """
+import fnmatch
 import json
 import os
 import sys
 
 SCHEMA = "https://opencode.ai/config.json"
+PAT_NAMES = ("GITHUB_TOKEN", "FETCH_GITHUB_TOKEN", "GH_TOKEN")
+PAT_PREFIXES = ("ghp_", "github_pat_")
 
-# V1 defaults that keep a headless session from blocking on an approval.
-# read: *.env asks by default in opencode 1.x -> deny it outright.
-# doom_loop: asks by default -> deny, so a stuck loop errors instead of hanging.
-# external_directory: asks outside the session dir -> allow, this is a
-# dedicated runner and the agent already has passwordless sudo.
-DEFAULTS = {
-    "read": {
-        "*": "allow",
-        "*.env": "deny",
-        "*.env.*": "deny",
-        "*.env.example": "allow",
-    },
-    "doom_loop": "deny",
-    "external_directory": "allow",
-}
+# V2 defaults. The last matching rule wins, so the broad allow comes first.
+DEFAULTS = [
+    {"action": "*", "resource": "*", "effect": "allow"},
+    {"action": "read", "resource": "*.env", "effect": "deny"},
+    {"action": "read", "resource": "*.env.*", "effect": "deny"},
+    {"action": "read", "resource": "*.env.example", "effect": "allow"},
+    {"action": "external_directory", "resource": "*", "effect": "allow"},
+]
+V1_ACTIONS = {"bash": "shell", "task": "subagent"}
 
 
 def strip_jsonc(text):
     """Drop // and /* */ comments and trailing commas, respecting strings."""
-    out = []
-    i = 0
-    n = len(text)
-    in_str = False
-    esc = False
+    out, i, n = [], 0, len(text)
+    in_str, esc = False, False
     while i < n:
         c = text[i]
         if in_str:
@@ -81,69 +74,146 @@ def strip_jsonc(text):
     return "".join(out)
 
 
-def strip_v2(node):
-    """Remove every V2 `permissions` key. Returns True if one was found."""
-    found = False
-    if isinstance(node, dict):
-        if "permissions" in node:
-            del node["permissions"]
-            found = True
-        for value in node.values():
-            found = strip_v2(value) or found
-    elif isinstance(node, list):
-        for value in node:
-            found = strip_v2(value) or found
-    return found
+def translate_v1(v1, warnings):
+    """Convert one V1 permission block into V2 rules."""
+    rules = []
+    if isinstance(v1, str):
+        v1 = {"*": v1}
+    if not isinstance(v1, dict):
+        warnings.append("V1 permission block is not an object; skipped")
+        return rules
+    for action, value in v1.items():
+        if action in ("doom_loop", "lsp"):
+            warnings.append("V1 action %s has no V2 equivalent" % action)
+            continue
+        mapped = V1_ACTIONS.get(action, action)
+        if isinstance(value, str):
+            value = {"*": value}
+        if not isinstance(value, dict):
+            warnings.append("V1 %s rule is not an object; skipped" % action)
+            continue
+        for resource, effect in value.items():
+            rules.append({"action": mapped, "resource": resource, "effect": effect})
+    return rules
+
+
+def pop_v1_permissions(cfg, warnings):
+    """Take V1 permission blocks only where documented; return their rules."""
+    rules = []
+    if "permission" in cfg:
+        rules.extend(translate_v1(cfg.pop("permission"), warnings))
+    for key in ("agent", "agents"):
+        agents = cfg.get(key)
+        if not isinstance(agents, dict):
+            continue
+        for agent in agents.values():
+            if isinstance(agent, dict) and "permission" in agent:
+                agent_rules = translate_v1(agent.pop("permission"), warnings)
+                existing = agent.get("permissions")
+                if isinstance(existing, list):
+                    agent["permissions"] = existing + agent_rules
+                else:
+                    agent["permissions"] = agent_rules
+    return rules
+
+
+def is_pat(value):
+    if not isinstance(value, str):
+        return False
+    return (
+        any(name in value for name in PAT_NAMES)
+        or value.startswith(PAT_PREFIXES)
+    )
 
 
 def sanitize_pat_providers(cfg):
-    """Drop provider apiKey values sourced from a GitHub PAT. Returns ids fixed."""
+    """Drop provider credentials sourced from a GitHub PAT. Returns ids fixed."""
     fixed = []
-    providers = cfg.get("provider")
-    if not isinstance(providers, dict):
-        return fixed
-    for pid, pconf in providers.items():
-        if not isinstance(pconf, dict):
+    for key, holder in (("providers", "settings"), ("provider", "options")):
+        providers = cfg.get(key)
+        if not isinstance(providers, dict):
             continue
-        opts = pconf.get("options")
-        if not isinstance(opts, dict):
-            continue
-        key = opts.get("apiKey")
-        if isinstance(key, str) and (
-            "GITHUB_TOKEN" in key or "FETCH_GITHUB_TOKEN" in key or "GH_TOKEN" in key
-        ):
-            del opts["apiKey"]
-            fixed.append(pid)
+        for pid, pconf in providers.items():
+            if not isinstance(pconf, dict):
+                continue
+            changed = False
+            for place in (pconf, pconf.get(holder)):
+                if not isinstance(place, dict):
+                    continue
+                if "apiKey" in place and is_pat(place["apiKey"]):
+                    del place["apiKey"]
+                    changed = True
+                env = place.get("env")
+                if isinstance(env, list):
+                    kept = [e for e in env if not is_pat(e)]
+                    if len(kept) != len(env):
+                        place["env"] = kept
+                        changed = True
+            if changed:
+                fixed.append(pid)
     return fixed
 
 
-def merge_permission(cfg):
-    """Add missing V1 permission defaults. Operator rules win.
+def effective(rules, action, path):
+    """Last matching rule wins, like V2 opencode."""
+    result = "ask"
+    for rule in rules:
+        if rule.get("action") not in ("*", action):
+            continue
+        if fnmatch.fnmatch(path, str(rule.get("resource", ""))):
+            result = rule.get("effect", "ask")
+    return result
 
-    opencode uses the LAST matching rule, so defaults go first and the
-    operator's own patterns go last.
-    """
-    perm = cfg.get("permission")
-    if isinstance(perm, str):
-        return
-    if not isinstance(perm, dict):
-        cfg["permission"] = json.loads(json.dumps(DEFAULTS))
-        return
-    for key, value in DEFAULTS.items():
-        current = perm.get(key)
-        if current is None:
-            perm[key] = json.loads(json.dumps(value))
-        elif isinstance(current, dict) and isinstance(value, dict):
-            # Defaults first (canonical order), operator values on top, and
-            # operator-only patterns last. opencode takes the LAST match.
-            perm[key] = {**value, **current}
+
+def merge_permissions(cfg, v1_rules):
+    """Defaults first, then translated V1 rules, then operator rules in order."""
+    current = cfg.get("permissions")
+    if not isinstance(current, list):
+        if current is not None:
+            print(
+                "WARN: permissions is not a list; replacing with headless defaults",
+                file=sys.stderr,
+            )
+        current = []
+    operator, warnings = [], []
+    for rule in current:
+        if not isinstance(rule, dict):
+            warnings.append("dropped non-object permission rule")
+            continue
+        if rule.get("effect") not in ("allow", "deny", "ask"):
+            warnings.append("dropped rule with invalid effect: %r" % rule.get("effect"))
+            continue
+        operator.append(rule)
+    for w in warnings:
+        print("WARN: %s" % w, file=sys.stderr)
+
+    all_rules = list(v1_rules) + operator
+    merged = []
+    for default in DEFAULTS:
+        key = (default["action"], default["resource"])
+        if not any((r.get("action"), r.get("resource")) == key for r in all_rules):
+            merged.append(dict(default))
+    merged.extend(all_rules)
+
+    # Safety floor: never let an accidental broad rule expose .env files, but
+    # respect an operator's explicit allow for that exact path.
+    for path, pattern in ((".env", "*.env"), (".env.local", "*.env.*")):
+        explicit_allow = any(
+            r.get("action") in ("*", "read")
+            and r.get("resource") == pattern
+            and r.get("effect") == "allow"
+            for r in all_rules
+        )
+        if not explicit_allow and effective(merged, "read", path) != "deny":
+            merged.append({"action": "read", "resource": pattern, "effect": "deny"})
+    cfg["permissions"] = merged
 
 
 def fresh_config(model):
     cfg = {"$schema": SCHEMA}
     if model:
         cfg["model"] = model
-    merge_permission(cfg)
+    merge_permissions(cfg, [])
     return cfg
 
 
@@ -172,7 +242,7 @@ def main():
     if model and "/" not in model:
         print(
             "WARN: OPENCODE_MODEL=%r has no provider prefix; use provider/id "
-            "(e.g. opencode/deepseek-v4-flash)" % model,
+            "(e.g. opencode-go/deepseek-v4.1-flash)" % model,
             file=sys.stderr,
         )
 
@@ -208,32 +278,37 @@ def main():
             print("replaced non-object config (backup: %s.invalid)" % path)
         return 0
 
-    had_v2 = strip_v2(cfg)
-    if had_v2:
-        backup(path, ".v2.bak")
-    changed = had_v2
+    warnings = []
+    v1_present = "permission" in cfg
+    for key in ("agent", "agents"):
+        agents = cfg.get(key)
+        if isinstance(agents, dict):
+            v1_present = v1_present or any(
+                isinstance(a, dict) and "permission" in a for a in agents.values()
+            )
+    v1_rules = pop_v1_permissions(cfg, warnings)
+    if v1_rules:
+        warnings.append("translated %d V1 permission rule(s)" % len(v1_rules))
+    for w in warnings:
+        print("WARN: %s" % w, file=sys.stderr)
+    changed = v1_present
 
-    # The fetch PAT must never be a model key. The Copilot API rejects PATs, so a
-    # provider apiKey wired to it can never authenticate. Drop the mapping and
-    # leave the provider unconfigured instead of failing every turn.
     fixed = sanitize_pat_providers(cfg)
     if fixed:
         print(
-            "note: removed fetch-PAT apiKey from provider(s) %s; "
+            "note: removed fetch-PAT apiKey/env from provider(s) %s; "
             "Copilot needs an OAuth token via auth.json, not the fetch PAT"
             % ", ".join(fixed),
             file=sys.stderr,
         )
         changed = True
 
-    before = json.dumps(cfg.get("permission"))
-    merge_permission(cfg)
-    if json.dumps(cfg.get("permission")) != before:
+    before = json.dumps(cfg.get("permissions"))
+    merge_permissions(cfg, v1_rules)
+    if json.dumps(cfg.get("permissions")) != before:
         changed = True
 
     if model:
-        # .env wins: a redeploy that changes OPENCODE_MODEL must actually
-        # switch the runner default instead of keeping a stale file value.
         if cfg.get("model") != model:
             if "model" in cfg:
                 print(
@@ -245,10 +320,9 @@ def main():
             changed = True
 
     if changed:
-        if not had_v2:
-            backup(path, ".bak")
+        backup(path, ".bak")
         write(path, cfg)
-        print("updated %s%s" % (path, " (v2 permissions removed)" if had_v2 else ""))
+        print("updated %s%s" % (path, " (V1 permissions translated)" if v1_rules else ""))
     else:
         print("ok %s" % path)
     return 0

@@ -145,22 +145,24 @@ curl -fsS -X POST http://127.0.0.1:4096/api/session \
   -d '{"location":{"directory":"/workspace/repo"}}'
 
 # 2. prompt, wait, read assistant messages
-#    POST /api/session/{id}/prompt      body: {"prompt":{"text":"..."}}
+#    POST /api/session/{id}/prompt      body: {"text":"..."}
 #    POST /api/session/{id}/wait        gateway blocks until the turn settles,
 #                                       then 204 (or 204 on timeout: poll below)
 #    GET  /api/session/{id}/message?order=desc&limit=10   -> {"data":[...]}
-#    GET  /vcs/diff?directory=/workspace/repo&mode=git
+#    GET  /api/vcs/diff?location%5Bdirectory%5D=/workspace/repo&mode=working
 ```
 
-Upstream `opencode serve` 1.x leaves `POST /api/session/{id}/wait` as a stub
-that always answers 503. The gateway on port 4096 implements it: it polls
+`GET /api/health` is answered by the gateway itself (V2 opencode dropped that
+endpoint) and needs the same Basic auth; it probes `/api/model` upstream first,
+so it goes red when the agent is down. V2 has no `POST /api/session/{id}/wait`
+at that path. The gateway on port 4096 supplies it: it polls
 the session messages until the newest message is a finished assistant turn
 and answers 204, so the client then reads the reply. If the budget
-(`WAIT_TIMEOUT_SECONDS`, default 600) runs out it still answers 204 and the
+(`WAIT_TIMEOUT_SECONDS`, default 540) runs out it still answers 204 and the
 client polls `GET .../message` until a `COMPLETE` assistant reply appears
 (`time.completed` set, or `finish` set; streaming partials do not count).
 
-`@opencode/client` works too; see `docs/CALLING.md`.
+V2's OpenAPI contract is at `/openapi.json`; see `docs/CALLING.md`.
 
 ### Choosing a model
 
@@ -208,7 +210,7 @@ provider catalog (models.dev):
 | `openrouter` | `OPENROUTER_API_KEY` | |
 | `deepseek` | `DEEPSEEK_API_KEY` | |
 | `nvidia` | `NVIDIA_API_KEY` | fallback seat models (e.g. `minimaxai/minimax-m3.1-flash`) |
-| `github-copilot` | OAuth token in `auth.json` only | `opencode providers` login; the fetch PAT is rejected by the Copilot API (HTTP 400) |
+| `github-copilot` | OAuth token in `auth.json` only | `opencode auth login`; the fetch PAT is rejected by the Copilot API (HTTP 400) |
 
 The provider/key mapping above is mirrored in `scripts/model-key-check`
 (the boot check); update both together.
@@ -233,9 +235,9 @@ instead and reference them with `{env:VAR}`:
 // /home/agent/.config/opencode/opencode.json
 {
   "model": "opencode-go/deepseek-v4-pro",
-  "provider": {
-    "opencode-go": { "options": { "apiKey": "{env:OPENCODE_GO_KEY}" } },
-    "opencode": { "options": { "apiKey": "{env:OPENCODE_CONSOLE_KEY}" } }
+  "providers": {
+    "opencode-go": { "settings": { "apiKey": "{env:OPENCODE_GO_KEY}" } },
+    "opencode": { "settings": { "apiKey": "{env:OPENCODE_CONSOLE_KEY}" } }
   }
 }
 ```
@@ -246,15 +248,16 @@ Apply and verify:
 
 ```bash
 docker compose up -d --force-recreate      # env_file changes need a recreate
-docker exec -u agent opencode-runner opencode models opencode-go | head
+docker exec -u agent opencode-runner opencode models | grep opencode-go | head
 ```
 
-`opencode models <provider>` lists what the runner can actually reach. The
-first prompt after adding a key fails if the model id is wrong.
+`opencode models` (no provider argument in V2) lists what the runner can
+actually reach. The first prompt after adding a key fails if the model id is
+wrong.
 
 Keys can also be stored by opencode itself in
 `/home/agent/.local/share/opencode/auth.json` (inside the home volume) via
-`opencode providers`, or at runtime with
+`opencode auth login`, or at runtime with
 `POST /api/integration/{providerID}/connect/key` body `{"key":"..."}`. Env is
 the simple path; the stored path keeps the key out of the container env.
 
@@ -284,11 +287,11 @@ For each delegated task:
    uses its own configured default. If a task needs a specific model, first
    GET /api/model and use one the runner lists there, then
    POST /api/session/{id}/model with {"model":{"providerID":"...","id":"..."}}.
-3. POST /api/session/{id}/prompt with body {"prompt":{"text":"<task>"}}.
+3. POST /api/session/{id}/prompt with body {"text":"<task>"}.
 4. POST /api/session/{id}/wait.
 5. GET /api/session/{id}/message?order=desc&limit=10 and
-   GET /vcs/diff?directory=<dir>&mode=git. Report the final assistant message
-   and the diff to me.
+   GET /api/vcs/diff?location%5Bdirectory%5D=<dir>&mode=working. Report the final
+   assistant message and the diff to me.
 
 All repos stay flat under /workspace. Do not clone locally. Do not ask the
 runner for its PAT. Do not commit or push unless the task says so.
@@ -296,7 +299,8 @@ runner for its PAT. Do not commit or push unless the task says so.
 
 ## Update opencode
 
-Version pinned in `Dockerfile` (`ARG OPENCODE_VERSION=1.19.6`). Bump it, then:
+V2 CLI pinned in `Dockerfile` (`ARG OPENCODE_VERSION=2.3.2`, npm package
+`@opencode/cli`; the legacy `opencode-ai` package stops at 1.19.6). Bump it, then:
 
 ```bash
 docker compose up -d --build
@@ -316,14 +320,14 @@ All commands run on the runner host, never from the calling harness.
   provider call never returned. Check `docker logs opencode-runner` for the
   boot line `default model: ...` (warns when the provider key env var is
   empty), verify the key, then from the host:
-  `docker exec -u agent opencode-runner opencode models <provider> | head`
+  `docker exec -u agent opencode-runner opencode models | grep <provider> | head`
   and `curl -m 10 -o /dev/null -w "%{http_code}" https://opencode.ai/inference/openai/v1/models`.
   Free-tier models can also queue server-side for a long time; a cheap paid
   model is the better default.
 - `github-copilot` turn errors `Personal Access Tokens are not supported`:
   a PAT reached the provider. Boot fails while legacy `GITHUB_TOKEN` is set;
   after the rename, `GITHUB_TOKEN` must stay unset so the catalog default
-  cannot pick it up. Copilot needs an OAuth token via `opencode providers`.
+  cannot pick it up. Copilot needs an OAuth token via `opencode auth login`.
 - `Model unavailable: provider/model`: the model id is wrong or its provider
   has no key. List `GET /api/model` and match the provider to the key table.
 
@@ -345,10 +349,13 @@ All commands run on the runner host, never from the calling harness.
   one-shot `tailscale-serve` helper that maps the VS Code port onto
   Tailscale Serve HTTPS. See "VS Code over Tailscale" above.
 - `opencode.json` is written at boot by `scripts/opencode-config`: it holds
-  `$schema`, the model, and the V1 `permission` block. A V2 `permissions` array
-  from an older image is removed (original kept as `opencode.json.v2.bak`), an
-  unparseable file is kept as `opencode.json.invalid`, and every other key you
-  added is preserved.
+  `$schema`, the model, and the V2 `permissions` array. A V1 `permission` block
+  from an older image is translated to V2 rules (original kept as
+  `opencode.json.bak`); unmappable actions are warned on stderr. An unparseable
+  file is kept as `opencode.json.invalid`. Operator rules keep their written
+  order; a `.env` deny is re-applied last unless explicitly allowed. The helper
+  also strips provider `apiKey`/`env` values wired to a GitHub PAT (both
+  `providers.<id>.settings` and the deprecated V1 form).
 - Model selection: leave `OPENCODE_MODEL` empty (recommended). The delegating
   agent then sets the model per session and the runner keeps no default;
   boot logs a reminder. Set `OPENCODE_MODEL=provider/id` in `.env` and

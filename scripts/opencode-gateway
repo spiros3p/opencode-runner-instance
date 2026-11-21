@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Reverse proxy in front of `opencode serve` that implements session wait.
 
-Upstream opencode 1.x leaves `POST /api/session/{id}/wait` as a stub that
-always answers 503 `Session wait is not available yet`. This gateway owns the
-external port, forwards everything else byte-for-byte, and turns wait into a
-real blocking call: it polls the session messages until the latest turn
+Upstream opencode leaves `POST /api/session/{id}/wait` as a stub. This gateway
+owns the external port, forwards everything else byte-for-byte, and turns wait
+into a real blocking call: it polls the session messages until the latest turn
 settles (or the budget runs out) and then answers 204 so the caller can poll
-`GET /api/session/{id}/message` for the final text.
+`GET /api/session/{id}/message` for the final text. It also answers
+`GET /api/health` locally (after probing `/api/model` upstream), because V2
+opencode dropped that endpoint.
 
 Config via env:
   GATEWAY_LISTEN_HOST / GATEWAY_LISTEN_PORT (default 0.0.0.0 / 4096)
@@ -91,7 +92,14 @@ def settled(messages):
         if t == "user":
             return False
         if t == "assistant":
-            if m.get("finish") is not None or m.get("error") is not None:
+            # V2 emits an interim assistant turn with finish=tool-calls and a
+            # completion time before the model continues. That is not the end.
+            finish = m.get("finish")
+            if finish == "tool-calls":
+                return False
+            if m.get("error") is not None or finish in (
+                "stop", "length", "error", "content-filter", "unknown"
+            ):
                 return True
             tm = m.get("time") or {}
             if isinstance(tm, dict) and tm.get("completed") is not None:
@@ -204,6 +212,31 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.flush()
 
     def proxy(self):
+        # V2 opencode dropped /api/health. Answer it here, but check the
+        # upstream first so a dead agent does not look green to the orchestrator.
+        path = urllib.parse.urlsplit(self.path).path.rstrip("/") or "/"
+        if self.command in ("GET", "HEAD") and path == "/api/health":
+            if self.command == "HEAD":
+                self.send_response(200)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            auth = {"Authorization": self.headers.get("Authorization", "")}
+            try:
+                st, _rh, _data = upstream_request(
+                    "GET", "/api/model", auth, None, timeout=3)
+            except Exception as e:
+                log(f"health: upstream error: {e}")
+                self.send_json(502, {"healthy": False,
+                                     "message": "opencode server is unreachable"})
+                return
+            if st == 200:
+                self.send_json(200, {"healthy": True})
+            else:
+                log(f"health: upstream returned {st}")
+                self.send_json(502, {"healthy": False,
+                                     "message": f"opencode server returned {st}"})
+            return
         if self.headers.get("Upgrade"):
             self.send_json(501, {"_tag": "NotImplementedError",
                                  "message": "websocket upgrade is not proxied"})
@@ -262,7 +295,7 @@ def wait_for_upstream(timeout=120):
     while time.time() < end:
         try:
             conn = http_client.HTTPConnection(UPSTREAM_HOST, UPSTREAM_PORT, timeout=5)
-            conn.request("GET", "/api/health", headers=auth)
+            conn.request("GET", "/api/model", headers=auth)
             ok = conn.getresponse().status == 200
             conn.close()
             if ok:
@@ -301,6 +334,8 @@ if __name__ == "__main__":
         assert settled({"data": []}) is True
         assert settled({"data": [{"type": "user"}]}) is False
         assert settled({"data": [{"type": "assistant", "finish": None}]}) is False
+        assert settled({"data": [{"type": "assistant", "finish": "tool-calls",
+                                 "time": {"completed": 1}}]}) is False
         assert settled({"data": [{"type": "assistant", "finish": "stop"}]}) is True
         assert settled({"data": [{"type": "assistant", "finish": "error"}]}) is True
         assert settled({"data": [{"type": "assistant", "finish": "stop"}, {"type": "user"}]}) is True

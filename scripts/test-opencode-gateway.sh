@@ -32,8 +32,10 @@ class H(BaseHTTPRequestHandler):
         self.send_header('Content-Length', str(len(body))); self.end_headers()
         self.wfile.write(body)
     def do_GET(self):
-        if self.path == '/api/health':
-            return self._send(200, {'healthy': True})
+        if self.path == '/api/model':
+            if mode() == 'down':
+                return self._send(503, {'error': 'down'})
+            return self._send(200, {'data': []})
         if self.path == '/stream':
             self.send_response(200)
             self.send_header('Content-Type', 'text/event-stream')
@@ -53,6 +55,8 @@ class H(BaseHTTPRequestHandler):
         if self.path.startswith('/api/session/missing/message'):
             return self._send(404, {'_tag': 'SessionNotFoundError'})
         if self.path.startswith('/api/session/') and self.path.endswith('/message?order=desc&limit=10'):
+            if mode() == 'toolcalls':
+                return self._send(200, {'data': [{'type': 'assistant', 'finish': 'tool-calls', 'time': {'completed': 1}}, {'type': 'user'}]})
             if mode() == 'settled':
                 return self._send(200, {'data': [{'type': 'assistant', 'finish': 'stop', 'content': [{'type': 'text', 'text': 'OK'}]}, {'type': 'user'}]})
             return self._send(200, {'data': [{'type': 'user'}]})
@@ -81,9 +85,19 @@ CODE=$(curl -sS -o /dev/null -w '%{http_code}' "$GW/api/health")
 CODE=$(curl -sS -o /dev/null -w '%{http_code}' -u opencode:wrong "$GW/api/health")
 [ "$CODE" = "401" ] || fail "expected 401 with wrong password, got $CODE"
 
-# 2. passthrough works with auth
+# 2. health answered locally, passthrough works with auth
 BODY=$(curl -fsS -u opencode:test-secret-123 "$GW/api/health")
-[ "$BODY" = '{"healthy": true}' ] || fail "passthrough body mismatch: $BODY"
+[ "$BODY" = '{"healthy": true}' ] || fail "health body mismatch: $BODY"
+BODY=$(curl -fsS -u opencode:test-secret-123 "$GW/api/model")
+[ "$BODY" = '{"data": []}' ] || fail "passthrough body mismatch: $BODY"
+
+# 2b. health must go red when the upstream agent is down
+echo -n down > "$MODE_FILE"
+CODE=$(curl -sS -o /dev/null -w '%{http_code}' -u opencode:test-secret-123 "$GW/api/health")
+[ "$CODE" = "502" ] || fail "expected 502 for dead upstream, got $CODE"
+echo -n settled > "$MODE_FILE"
+CODE=$(curl -sS -o /dev/null -w '%{http_code}' -u opencode:test-secret-123 "$GW/api/health")
+[ "$CODE" = "200" ] || fail "expected 200 for live upstream, got $CODE"
 
 # 3. wait on settled session -> fast 204 (proves the 503 stub is gone)
 echo -n settled > "$MODE_FILE"
@@ -127,5 +141,19 @@ CODE=$(cat "$T/mid.code")
 [ "$CODE" = "204" ] || fail "expected 204 for mid-wait settle, got $CODE"
 ELAPSED=$(( $(date +%s) - START ))
 [ "$ELAPSED" -lt 8 ] || fail "mid-wait settle too slow: ${ELAPSED}s"
+
+# 9. an interim tool-calls turn must not release wait early
+echo -n toolcalls > "$MODE_FILE"
+START=$(date +%s)
+curl -fsS -o /dev/null -w '%{http_code}' -X POST -u opencode:test-secret-123 \
+  "$GW/api/session/ses_tool/wait" > "$T/tool.code" & TOOL_PID=$!
+sleep 3
+[ -s "$T/tool.code" ] && fail "wait returned during tool-calls turn"
+echo -n settled > "$MODE_FILE"
+wait "$TOOL_PID" || fail "tool-calls wait curl failed"
+CODE=$(cat "$T/tool.code")
+[ "$CODE" = "204" ] || fail "expected 204 after settle, got $CODE"
+ELAPSED=$(( $(date +%s) - START ))
+[ "$ELAPSED" -ge 3 ] || fail "wait released too early: ${ELAPSED}s"
 
 echo "opencode-gateway tests passed"

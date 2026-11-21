@@ -30,7 +30,7 @@ fi
 
 curl -fsS -X POST "$OC/api/session/$SESSION/prompt" \
   -u "opencode:$OPENCODE_PASSWORD" -H 'Content-Type: application/json' \
-  -d "$(jq -nc --rawfile text "$TASK" '{prompt:{text:$text}}')" >/dev/null
+  -d "$(jq -nc --rawfile text "$TASK" '{text:$text}')" >/dev/null
 
 curl -fsS -X POST "$OC/api/session/$SESSION/wait" \
   -u "opencode:$OPENCODE_PASSWORD" >/dev/null

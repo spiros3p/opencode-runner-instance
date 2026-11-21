@@ -34,26 +34,27 @@ touch the runner host, its `.env`, or its secrets.
   unused). Set it after EVERY create; create never carries a model.
 - `POST /api/session/{id}/agent` body `{"agent":"..."}` (`build` vs
   read-only `plan`). Same override pattern as model.
-- `POST /api/session/{id}/prompt` body `{"prompt":{"text":"<task>"}}`.
+- `POST /api/session/{id}/prompt` body `{"text":"<task>"}` (V2; the V1
+  `{"prompt":{"text":...}}` shape is rejected).
 - `POST /api/session/{id}/wait` (body `{}`), then ALWAYS poll
   `GET /api/session/{id}/message?order=desc&limit=10` until a COMPLETE
   assistant reply: `finish` stop/completed (or `status` completed) with
   non-empty text. Streaming partials and tool-calls do not count.
   One overall deadline for wait+poll (600s); never loop forever.
-- `GET /vcs/diff?directory=<dir>&mode=git` (URL-encode directory).
+- `GET /api/vcs/diff?location%5Bdirectory%5D=<dir>&mode=working` (brackets must
+  stay percent-encoded or curl globbing breaks the call; V1 `/vcs/diff` and
+  `/vcs/diff/raw` are gone).
 - Stall diagnosis (no auto-approve, ever): `GET
-  /api/session/{id}/permission` and `GET /api/session/{id}/question` list
-  pending requests (`{"data":[...]}`). Answer permission with
-  `POST .../permission/{id}/reply` body `{"reply":"once"|"always"|"reject"}`;
-  answer question with `POST .../question/{id}/reply` body
-  `{"answers":[{"value":"..."}]}` (one per question, in order), or
-  `POST .../question/{id}/reject` with no body. Keep prompts deny-based.
+  /api/session/{id}/permission` lists pending approvals (`{"data":[...]}`);
+  answer with `POST .../permission/{id}/reply` body
+  `{"decision":"once"|"always"|"reject"}`. V2 has no question API: questions
+  arrive as forms via `GET /api/session/{id}/form` and
+  `POST .../form/{id}/reply`. Keep prompts deny-based.
 - Review handoff: runner never merges. Final text from `GET .../message`.
-  Patch for applying: `GET /vcs/diff/raw?directory=<dir>` returns the whole
-  diff as `text/x-diff` (no `mode` param), so `git apply` ready. `GET
-  /vcs/diff?directory=<dir>&mode=git` is only a JSON summary
-  (`{file, patch, additions, deletions, status}` per file); do not try to
-  `git apply` that JSON. Apply locally, then review with the local lane.
+  Patch for applying: `GET /api/vcs/diff?location%5Bdirectory%5D=<dir>&mode=working`
+  returns `{"location":...,"data":[...]}` with a `patch` field per file;
+  concatenate those patches into a `git apply`-ready file. V1's raw-diff
+  endpoint no longer exists. Apply locally, then review with the local lane.
 
 ## 3. Your work items (in order)
 
@@ -97,7 +98,7 @@ optional `variant` key and the new reads.
 
 - `health` passes; `fetch` returns a `/workspace/<repo>` path.
 - `run` with an explicit model + variant returns a COMPLETE assistant reply
-  within the single deadline; `/vcs/diff` reflects the work.
+  within the single deadline; `/api/vcs/diff` reflects the work.
 - No 401/503 anywhere; a stalled permission surfaces the session id
   instead of hanging.
 

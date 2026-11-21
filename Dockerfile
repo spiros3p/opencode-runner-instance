@@ -20,8 +20,10 @@ RUN userdel -r node 2>/dev/null; groupdel node 2>/dev/null; \
      && echo 'agent ALL=(ALL:ALL) NOPASSWD: ALL' > /etc/sudoers.d/agent \
      && chmod 440 /etc/sudoers.d/agent
 
-ARG OPENCODE_VERSION=1.19.6
-RUN npm install -g --no-fund --no-audit "opencode-ai@${OPENCODE_VERSION}" \
+# V2 CLI lives in @opencode/cli. The legacy `opencode-ai` npm package stops at
+# 1.19.6 and cannot reach the Go provider API (stable x-opencode-session header).
+ARG OPENCODE_VERSION=2.3.2
+RUN npm install -g --no-fund --no-audit "@opencode/cli@${OPENCODE_VERSION}" \
      && opencode --version
 
 # code-server stays in the image; ENABLE_CODE_SERVER decides if it runs.

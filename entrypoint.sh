@@ -80,10 +80,9 @@ runuser -u agent -- env HOME="$H" git config --global user.email "${GIT_IDENTITY
 chown -R agent:agent "$H"
 chmod -R u+rwX,go-rwx "$H"
 
-# Native opencode config. The image pins opencode 1.x, which rejects the V2
-# `permissions` array and then refuses to start. The helper repairs that,
-# keeps the operator's own keys, and adds the V1 permission defaults that stop
-# a headless session from blocking on an approval prompt.
+# Native opencode V2 config. The helper writes the V2 `permissions` array,
+# drops deprecated V1 `permission` objects, keeps the operator's own keys, and
+# adds the headless defaults that stop a turn blocking on an approval prompt.
 install -d -o agent -g agent -m 700 "$H/.config/opencode"
 OC_CFG="$H/.config/opencode/opencode.json"
 if ! OC_OUT="$(runuser -u agent -- env HOME="$H" OPENCODE_MODEL="${OPENCODE_MODEL:-}" \
