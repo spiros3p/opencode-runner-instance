@@ -34,7 +34,7 @@ unset GITHUB_TOKEN
 if [ -n "${FETCH_GITHUB_TOKEN:-}" ]; then
   export GH_TOKEN="${GH_TOKEN:-$FETCH_GITHUB_TOKEN}"
 fi
-log "fetch pat: $([ -n "${FETCH_GITHUB_TOKEN:-}" ] && echo set || echo unset) (FETCH_GITHUB_TOKEN: fetch-repo clones only, hidden from the model server)"
+log "fetch pat: $([ -n "${FETCH_GITHUB_TOKEN:-}" ] && echo set || echo unset) (FETCH_GITHUB_TOKEN -> fetch-repo clones and GH_TOKEN for gh; no model provider maps it)"
 
 # Default-model provider check. The runner answers only when the default
 # model's provider has a key. Warns here so a missing key is visible in
